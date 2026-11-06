@@ -1,0 +1,18 @@
+{
+  "name": "orca-team",
+  "version": "0.2.0",
+  "description": "Controlled multi-role engineering team gateway plugin for Google Antigravity powered by stablyai/orca.",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "link-plugin": "node ./scripts/link-plugin.mjs",
+    "unlink-plugin": "node ./scripts/link-plugin.mjs --unlink",
+    "verify": "node ./tests/verify.mjs",
+    "smoke": "node ./tests/smoke.mjs",
+    "audit": "node ./scripts/audit.mjs"
+  }
+}

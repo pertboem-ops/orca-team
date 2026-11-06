@@ -1,0 +1,207 @@
+{
+  "schemaVersion": 2,
+  "asOf": "2026-11-04",
+  "maxBatchSize": 4,
+  "defaultWaitSeconds": 20,
+  "maxWaitSeconds": 55,
+  "cliCapabilities": {
+    "antigravity": {
+      "supportsModelFlag": true,
+      "supportsEffortFlag": true,
+      "defaultFamilyConfidence": "flag-verified"
+    },
+    "kimi": {
+      "supportsModelFlag": false,
+      "supportsEffortFlag": false,
+      "defaultFamilyConfidence": "config-inferred"
+    },
+    "pi": {
+      "supportsModelFlag": false,
+      "supportsEffortFlag": false,
+      "defaultFamilyConfidence": "config-inferred"
+    },
+    "dsh": {
+      "supportsModelFlag": false,
+      "supportsEffortFlag": false,
+      "defaultFamilyConfidence": "config-inferred"
+    },
+    "opencode": {
+      "supportsModelFlag": false,
+      "supportsEffortFlag": false,
+      "defaultFamilyConfidence": "config-inferred"
+    },
+    "claude": {
+      "supportsModelFlag": true,
+      "supportsEffortFlag": true,
+      "defaultFamilyConfidence": "flag-verified"
+    },
+    "codex": {
+      "supportsModelFlag": true,
+      "supportsEffortFlag": true,
+      "defaultFamilyConfidence": "flag-verified"
+    }
+  },
+  "typeRouting": {
+    "architecture": {
+      "normal": { "role": "architect", "tier": "normal" },
+      "hard": { "role": "architect", "tier": "hard" }
+    },
+    "feature": {
+      "normal": { "role": "coder-fast", "tier": "normal" },
+      "hard": { "role": "coder-pro", "tier": "hard" }
+    },
+    "bugfix": {
+      "normal": { "role": "coder-fast", "tier": "normal" },
+      "hard": { "role": "coder-pro", "tier": "hard" }
+    },
+    "refactor": {
+      "normal": { "role": "coder-fast", "tier": "normal" },
+      "hard": { "role": "coder-pro", "tier": "hard" }
+    },
+    "review": {
+      "normal": { "role": "reviewer", "tier": "normal" },
+      "hard": { "role": "reviewer", "tier": "hard" }
+    },
+    "test": {
+      "normal": { "role": "tester", "tier": "normal" },
+      "hard": { "role": "tester", "tier": "hard" }
+    }
+  },
+  "roles": {
+    "architect": {
+      "title": "架构师 (Architect)",
+      "mode": "readonly",
+      "enforceCrossFamily": false,
+      "description": "负责模块边界推演、接口契约设计与重构方案拆解（严格只读，禁止修改工作树任何文件）。",
+      "tiers": {
+        "normal": [
+          { "cli": "pi", "model": null, "effort": null, "expectedFamily": "qwen" },
+          { "cli": "kimi", "model": null, "effort": null, "expectedFamily": "moonshot" },
+          { "cli": "antigravity", "model": "gpt-oss-120b-medium", "effort": "medium", "expectedFamily": "openai-oss" }
+        ],
+        "hard": [
+          { "cli": "kimi", "model": null, "effort": null, "expectedFamily": "moonshot" },
+          { "cli": "antigravity", "model": "claude-opus-5-5-high", "effort": "high", "expectedFamily": "anthropic" },
+          { "cli": "pi", "model": null, "effort": null, "expectedFamily": "qwen" }
+        ]
+      }
+    },
+    "coder-fast": {
+      "title": "常规工程师 (Coder-Fast)",
+      "mode": "write",
+      "enforceCrossFamily": false,
+      "description": "负责常规功能实现、脚手架搭建、常规缺陷修复与小型重构（主树独占租约 + team/<taskId> 独立分支）。",
+      "tiers": {
+        "normal": [
+          { "cli": "pi", "model": null, "effort": null, "expectedFamily": "qwen" },
+          { "cli": "antigravity", "model": "claude-sonnet-5-5-high", "effort": "high", "expectedFamily": "anthropic" },
+          { "cli": "dsh", "model": null, "effort": null, "expectedFamily": "deepseek" },
+          { "cli": "opencode", "model": null, "effort": null, "expectedFamily": "deepseek" }
+        ],
+        "hard": [
+          { "cli": "antigravity", "model": "claude-sonnet-5-5-high", "effort": "high", "expectedFamily": "anthropic" },
+          { "cli": "pi", "model": null, "effort": null, "expectedFamily": "qwen" },
+          { "cli": "dsh", "model": null, "effort": null, "expectedFamily": "deepseek" }
+        ]
+      }
+    },
+    "coder-pro": {
+      "title": "攻坚工程师 (Coder-Pro)",
+      "mode": "write",
+      "enforceCrossFamily": false,
+      "description": "负责核心状态机实现、跨模块复杂重构、安全加固与高难缺陷攻坚（主树独占租约 + team/<taskId> 独立分支）。",
+      "tiers": {
+        "normal": [
+          { "cli": "antigravity", "model": "claude-opus-5-5-high", "effort": "high", "expectedFamily": "anthropic" },
+          { "cli": "kimi", "model": null, "effort": null, "expectedFamily": "moonshot" },
+          { "cli": "pi", "model": null, "effort": null, "expectedFamily": "qwen" }
+        ],
+        "hard": [
+          { "cli": "antigravity", "model": "claude-opus-5-5-high", "effort": "high", "expectedFamily": "anthropic" },
+          { "cli": "kimi", "model": null, "effort": null, "expectedFamily": "moonshot" },
+          { "cli": "pi", "model": null, "effort": null, "expectedFamily": "qwen" }
+        ]
+      }
+    },
+    "reviewer": {
+      "title": "异源审查官 (Reviewer)",
+      "mode": "readonly",
+      "enforceCrossFamily": true,
+      "description": "负责对目标写任务分支执行跨模型家族独立代码审查与安全审计（严格只读，自动避开目标分支全部写 attempt 家族，无异源候选时 fail-closed）。",
+      "tiers": {
+        "normal": [
+          { "cli": "antigravity", "model": "gpt-oss-120b-medium", "effort": "medium", "expectedFamily": "openai-oss" },
+          { "cli": "dsh", "model": null, "effort": null, "expectedFamily": "deepseek" },
+          { "cli": "kimi", "model": null, "effort": null, "expectedFamily": "moonshot" },
+          { "cli": "antigravity", "model": "claude-sonnet-5-5-high", "effort": "high", "expectedFamily": "anthropic" }
+        ],
+        "hard": [
+          { "cli": "antigravity", "model": "claude-sonnet-5-5-high", "effort": "high", "expectedFamily": "anthropic" },
+          { "cli": "antigravity", "model": "gpt-oss-120b-medium", "effort": "medium", "expectedFamily": "openai-oss" },
+          { "cli": "kimi", "model": null, "effort": null, "expectedFamily": "moonshot" },
+          { "cli": "dsh", "model": null, "effort": null, "expectedFamily": "deepseek" }
+        ]
+      }
+    },
+    "tester": {
+      "title": "测试与故障注入工程师 (Tester)",
+      "mode": "write",
+      "enforceCrossFamily": false,
+      "description": "负责编写单元/集成测试、负向故障注入用例并执行回归验证（支持独立分支或 reuseBranchOfTaskId 复用写任务分支）。",
+      "tiers": {
+        "normal": [
+          { "cli": "dsh", "model": null, "effort": null, "expectedFamily": "deepseek" },
+          { "cli": "antigravity", "model": "gpt-oss-120b-medium", "effort": "medium", "expectedFamily": "openai-oss" },
+          { "cli": "pi", "model": null, "effort": null, "expectedFamily": "qwen" }
+        ],
+        "hard": [
+          { "cli": "antigravity", "model": "claude-sonnet-5-5-high", "effort": "high", "expectedFamily": "anthropic" },
+          { "cli": "kimi", "model": null, "effort": null, "expectedFamily": "moonshot" },
+          { "cli": "dsh", "model": null, "effort": null, "expectedFamily": "deepseek" }
+        ]
+      }
+    }
+  },
+  "highRiskPatterns": [
+    "package.json",
+    "**/package.json",
+    "package-lock.json",
+    "**/package-lock.json",
+    "pnpm-lock.yaml",
+    "**/pnpm-lock.yaml",
+    "yarn.lock",
+    "**/yarn.lock",
+    "bun.lockb",
+    "bun.lock",
+    ".npmrc",
+    "**/.npmrc",
+    ".yarnrc",
+    ".yarnrc.yml",
+    "**/.yarnrc*",
+    ".env",
+    ".env.*",
+    "**/.env",
+    "**/.env.*",
+    ".git/**",
+    ".gitattributes",
+    "**/.gitattributes",
+    ".gitignore",
+    ".github/**",
+    ".husky/**",
+    "Makefile",
+    "Dockerfile",
+    "docker-compose*.yml",
+    "docker-compose*.yaml"
+  ],
+  "junkUntrackedExtensions": [
+    ".tmp",
+    ".bak",
+    ".orig",
+    ".swp",
+    ".swo",
+    ".log",
+    ".dmp",
+    ".cache",
+    ".pid"
+  ]
+}

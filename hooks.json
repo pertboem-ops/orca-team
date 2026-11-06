@@ -1,0 +1,16 @@
+{
+  "orca-team-lease-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "call_mcp_tool|mcp_orca_worktree_create|mcp_orca_worktree_manage|mcp_orca_agent_launch|mcp_orca_orchestration_worker",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./scripts/hook-guard.mjs",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
