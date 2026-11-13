@@ -1,7 +1,7 @@
 {
   "name": "orca-team",
   "displayName": "Orca Team 工程协同网关",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "基于 Antigravity + Orca 的受控多角色工程团队协同网关：提供 5 大专职工程角色跨模型异构路由、写审异源门禁、前置原始文件指纹防篡改、三栏上下文防火墙与 orca-cabinet 议定书一键施工闭环。",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [

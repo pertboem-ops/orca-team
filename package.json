@@ -1,10 +1,14 @@
 {
   "name": "orca-team",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Controlled multi-role engineering team gateway plugin for Google Antigravity powered by stablyai/orca.",
   "type": "module",
   "private": false,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pertboem-ops/orca-team.git"
+  },
   "engines": {
     "node": ">=20.0.0"
   },

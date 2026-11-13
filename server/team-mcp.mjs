@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 import { executeTeamTool } from './lib/executor.mjs';
 
 const SERVER_NAME = 'team-mcp';
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.2.1';
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05'];
 
 const SERVER_INSTRUCTIONS = [

@@ -1,6 +1,6 @@
-# `orca-team` — 基于 `stablyai/orca` 的 Antigravity 受控工程团队协同网关 (`v0.2.0`)
+# `orca-team` — 基于 `stablyai/orca` 的 Antigravity 受控工程团队协同网关 (`v0.2.1`)
 
-`orca-team` 是面向 Google Antigravity IDE/CLI 的零外部依赖多角色工程团队协同插件，对标升级自 [`Git-Yi-Zhou/paseo-team`](https://github.com/Git-Yi-Zhou/paseo-team)，并经本机 [`orca-cabinet`](../orca-cabinet) 四模型异构内阁（`anthropic` × `moonshot` × `qwen` × `deepseek`）两轮红蓝攻防审议定稿。
+`orca-team` 是面向 Google Antigravity IDE/CLI 的零外部依赖多角色工程团队协同插件，对标升级自 [`Git-Yi-Zhou/paseo-team`](https://github.com/Git-Yi-Zhou/paseo-team)，并经 [`pertboem-ops/orca-cabinet`](https://github.com/pertboem-ops/orca-cabinet) 四模型异构内阁（`anthropic` × `moonshot` × `qwen` × `deepseek`）两轮红蓝攻防审议定稿。
 
 它与 `orca-cabinet` 共同组成**「前店（内阁议事定策）+ 后厂（工程团队受控施工）」**双插件闭环：
 - **前店 (`orca-cabinet`)**：针对高选错代价决策召开异构内阁独立立论与交叉质询，归档防伪议定书 `.cabinet/runs/<runKey>/protocol.json`；
