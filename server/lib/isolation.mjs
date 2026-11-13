@@ -6,6 +6,7 @@ import {
   diffFingerprints,
   execGitSafe,
   inspectGitWorkspace,
+  quarantineAndNeutralizeExecutableTamper,
   restoreSensitiveBaseline
 } from './git-safe.mjs';
 
@@ -192,11 +193,26 @@ export async function prepareWorkspaceAndAcquireLease({
   const checkedOutHeadRes = await execGitSafe(['rev-parse', 'HEAD'], { cwd: gitRoot, signal });
   const checkedOutSha = checkedOutHeadRes.stdout || baseSha;
 
-  // Re-snapshot sensitive files on the checked-out branch so branch-specific `.env*`/`.npmrc` match accurately
+  // Root Baseline Fingerprint Inheritance (Red-Team `锋` R2 Deep Fix):
+  // Never overwrite `rootFingerprints` with post-checkout dirty/tampered branch state when reusing a branch!
+  // Always inherit the clean `baseBranch` root snapshot from the root task of the branch lineage.
+  const rootBaselineTaskId = reuseTask
+    ? reuseTask.rootBaselineTaskId || reuseTask.taskId
+    : targetTask && mode !== 'write'
+      ? targetTask.rootBaselineTaskId || targetTask.taskId
+      : taskId;
+  const inheritedRootRecord =
+    rootBaselineTaskId !== taskId ? loadBaselineSnapshot(workspaceRoot, rootBaselineTaskId) : null;
+  const rootFingerprints =
+    inheritedRootRecord?.rootFingerprints ||
+    inheritedRootRecord?.preCheckoutFingerprints ||
+    baselineFingerprints;
+
   const postCheckoutFingerprints = captureSensitiveFingerprints(gitRoot, { includeBackup: true });
 
   const baselineRecord = {
     taskId,
+    rootBaselineTaskId,
     attempt,
     capturedAt: new Date().toISOString(),
     gitRoot,
@@ -206,14 +222,16 @@ export async function prepareWorkspaceAndAcquireLease({
     checkedOutBranch,
     checkedOutSha,
     reusedExistingBranch,
-    baselineIgnored: gitState.status.ignored,
-    baselineFingerprints: postCheckoutFingerprints,
+    baselineIgnored: inheritedRootRecord?.baselineIgnored || gitState.status.ignored,
+    rootFingerprints,
+    baselineFingerprints: mode === 'write' ? rootFingerprints : postCheckoutFingerprints,
     preCheckoutFingerprints: baselineFingerprints
   };
   saveBaselineSnapshot(workspaceRoot, taskId, baselineRecord);
 
   const leaseObj = {
     taskId,
+    rootBaselineTaskId,
     attempt,
     roleId,
     mode,
@@ -229,6 +247,7 @@ export async function prepareWorkspaceAndAcquireLease({
 
   return {
     gitRoot,
+    rootBaselineTaskId,
     baseBranch,
     baseSha,
     branch: taskBranch,
@@ -243,6 +262,14 @@ export async function prepareWorkspaceAndAcquireLease({
  * Re-acquire the Main-Worktree Exclusive Lease and check out `team/<taskId>` for cold-start `team_steer`.
  */
 export async function reacquireLeaseForSteer({ workspaceRoot, task, nextAttempt, signal }) {
+  if (task.hasUnmergeableExecutableTamper) {
+    throw new TeamIsolationError(
+      'TEAM_EXECUTABLE_TAMPER_UNMERGEABLE',
+      `任务 "${task.taskId}" 前序回合曾篡改可执行级 Git 配置/钩子/过滤规则并已被隔离封存，严禁继续 steer 或 merge，请调用 team_merge(action="discard") 清理分支。`,
+      { taskId: task.taskId }
+    );
+  }
+
   const existingLease = readWorkspaceLease(workspaceRoot);
   if (existingLease && existingLease.taskId && existingLease.taskId !== task.taskId) {
     throw new TeamIsolationError(
@@ -252,16 +279,22 @@ export async function reacquireLeaseForSteer({ workspaceRoot, task, nextAttempt,
     );
   }
 
-  // Pre-Git fingerprint check against original baseline if present
+  // Pre-Git fingerprint check against original root baseline
   const prevBaseline = loadBaselineSnapshot(workspaceRoot, task.taskId);
+  const rootSnap =
+    prevBaseline?.rootFingerprints ||
+    prevBaseline?.preCheckoutFingerprints ||
+    prevBaseline?.baselineFingerprints ||
+    null;
   const preSteerFp = captureSensitiveFingerprints(workspaceRoot, { includeBackup: true });
-  if (prevBaseline?.preCheckoutFingerprints) {
-    const gitTamperCheck = diffFingerprints(prevBaseline.preCheckoutFingerprints, preSteerFp);
-    if (gitTamperCheck.hasGitInternalTamper) {
+  if (rootSnap) {
+    const gitTamperCheck = diffFingerprints(rootSnap, preSteerFp);
+    if (gitTamperCheck.hasExecutableTamper) {
+      const quarantined = quarantineAndNeutralizeExecutableTamper(workspaceRoot, rootSnap);
       throw new TeamIsolationError(
-        'TEAM_CRITICAL_TAMPER_BLOCKED',
-        `检测到仓库 .git 内部配置/钩子在 steer 前处于被篡改状态：${gitTamperCheck.changed.map((c) => c.displayPath).join(', ')}`,
-        { tampered: gitTamperCheck.changed }
+        'TEAM_EXECUTABLE_TAMPER_UNMERGEABLE',
+        `检测到仓库可执行级配置/钩子在 steer 前处于被篡改状态（已自动隔离还原）：${gitTamperCheck.changed.map((c) => c.displayPath).join(', ')}`,
+        { tampered: gitTamperCheck.changed, quarantined }
       );
     }
   }
@@ -293,10 +326,11 @@ export async function reacquireLeaseForSteer({ workspaceRoot, task, nextAttempt,
   const checkedOutHeadRes = await execGitSafe(['rev-parse', 'HEAD'], { cwd: gitRoot, signal });
   const checkedOutSha = checkedOutHeadRes.stdout || task.headSha || task.baseSha;
 
-  // Keep the ORIGINAL `preCheckoutFingerprints` / `baselineFingerprints` from attempt 1 if available
-  // so tampering introduced in attempt 1 is never washed away in attempt 2!
+  // Keep the ORIGINAL `rootFingerprints` from clean `baseBranch` so tampering in earlier attempts is never whitewashed!
+  const preservedRoot = rootSnap || preSteerFp;
   const updatedBaseline = {
     taskId: task.taskId,
+    rootBaselineTaskId: task.rootBaselineTaskId || prevBaseline?.rootBaselineTaskId || task.taskId,
     attempt: nextAttempt,
     capturedAt: new Date().toISOString(),
     gitRoot,
@@ -307,7 +341,8 @@ export async function reacquireLeaseForSteer({ workspaceRoot, task, nextAttempt,
     checkedOutSha,
     reusedExistingBranch: Boolean(task.reusedExistingBranch),
     baselineIgnored: prevBaseline?.baselineIgnored || gitState.status.ignored,
-    baselineFingerprints: prevBaseline?.baselineFingerprints || preSteerFp,
+    rootFingerprints: preservedRoot,
+    baselineFingerprints: preservedRoot,
     preCheckoutFingerprints: prevBaseline?.preCheckoutFingerprints || preSteerFp
   };
   saveBaselineSnapshot(workspaceRoot, task.taskId, updatedBaseline);
@@ -345,18 +380,41 @@ export async function settleWorkspaceAndReleaseLease({
   signal
 }) {
   const baseline = loadBaselineSnapshot(workspaceRoot, task.taskId);
+  const rootSnap =
+    baseline?.rootFingerprints ||
+    baseline?.preCheckoutFingerprints ||
+    baseline?.baselineFingerprints ||
+    null;
 
   // Step 1: Pure Node raw SHA-256 fingerprint check BEFORE running any `git` command!
   const postFingerprints = captureSensitiveFingerprints(workspaceRoot, { includeBackup: false });
-  const fpDiff = baseline?.baselineFingerprints
-    ? diffFingerprints(baseline.baselineFingerprints, postFingerprints)
-    : { ok: true, changed: [], hasGitInternalTamper: false, hasEnvOrRcTamper: false };
+  const fpDiff = rootSnap
+    ? diffFingerprints(rootSnap, postFingerprints)
+    : {
+        ok: true,
+        changed: [],
+        hasGitInternalTamper: false,
+        hasGitFilterAttrTamper: false,
+        hasIdeAutorunTamper: false,
+        hasEnvOrRcTamper: false,
+        hasExecutableTamper: false
+      };
+
+  // Step 1B: Immediate Pre-Git Quarantine & Neutralization (Red-Team `锋` R2 Deep Fix):
+  // Neutralize `.git/config` (`core.fsmonitor`), `.git/hooks/**`, `.gitattributes` (`filter.*`),
+  // and `.vscode/tasks.json` (`folderOpen` autorun) BEFORE any `git` command or background IDE poll!
+  let quarantinedExecutableTamper = null;
+  if (fpDiff.hasExecutableTamper && rootSnap) {
+    quarantinedExecutableTamper = quarantineAndNeutralizeExecutableTamper(workspaceRoot, rootSnap);
+  }
 
   const gitState = await inspectGitWorkspace(workspaceRoot, { includeIgnored: true, signal });
   if (!gitState.isGitRepo || !gitState.gitRoot) {
     clearWorkspaceLease(workspaceRoot, task.taskId);
     return {
       fpDiff,
+      quarantinedExecutableTamper,
+      gatewaySnapshot: null,
       changedFiles: [],
       diffStat: '',
       untrackedFiles: [],
@@ -385,6 +443,9 @@ export async function settleWorkspaceAndReleaseLease({
       (p) => isJunkUntrackedFile(p) || workerAlreadyCommitted
     );
 
+    let autoCommitted = false;
+    let autoCommittedFiles = [];
+
     // Stage and commit any uncommitted work onto `team/<taskId>` (never `.team` or `.cabinet`)
     if (gitState.status.trackedModified.length > 0 || gitState.status.untracked.length > 0) {
       if (gitState.currentBranch !== task.branch && (await branchExistsLocally(gitRoot, task.branch, signal))) {
@@ -397,7 +458,11 @@ export async function settleWorkspaceAndReleaseLease({
       );
       const stagedRes = await execGitSafe(['diff', '--cached', '--name-only'], { cwd: gitRoot, signal });
       if (stagedRes.stdout.length > 0) {
-        await execGitSafe(
+        autoCommittedFiles = stagedRes.stdout
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const cmRes = await execGitSafe(
           [
             '-c',
             'user.name=Orca Team Gateway',
@@ -409,8 +474,15 @@ export async function settleWorkspaceAndReleaseLease({
           ],
           { cwd: gitRoot, signal }
         );
+        autoCommitted = cmRes.exitCode === 0;
       }
     }
+
+    const gatewaySnapshot = {
+      autoCommitted,
+      autoCommittedFiles,
+      workerCommittedPrior: workerAlreadyCommitted
+    };
 
     const headRes = await execGitSafe(['rev-parse', `refs/heads/${task.branch}`], {
       cwd: gitRoot,
@@ -443,6 +515,8 @@ export async function settleWorkspaceAndReleaseLease({
 
     return {
       fpDiff,
+      quarantinedExecutableTamper,
+      gatewaySnapshot,
       changedFiles,
       diffStat,
       untrackedFiles,
@@ -502,6 +576,8 @@ export async function settleWorkspaceAndReleaseLease({
 
   return {
     fpDiff,
+    quarantinedExecutableTamper,
+    gatewaySnapshot: null,
     changedFiles: [],
     diffStat: '',
     untrackedFiles: [],
@@ -535,12 +611,27 @@ export async function mergeOrDiscardTaskBranch({
   }
 
   const baseline = loadBaselineSnapshot(workspaceRoot, task.taskId);
+  const rootSnap =
+    baseline?.rootFingerprints ||
+    baseline?.preCheckoutFingerprints ||
+    baseline?.baselineFingerprints ||
+    null;
   const preMergeFp = captureSensitiveFingerprints(workspaceRoot, { includeBackup: false });
-  const fpDiff = baseline?.preCheckoutFingerprints
-    ? diffFingerprints(baseline.preCheckoutFingerprints, preMergeFp)
-    : baseline?.baselineFingerprints
-      ? diffFingerprints(baseline.baselineFingerprints, preMergeFp)
-      : { ok: true, changed: [], hasGitInternalTamper: false, hasEnvOrRcTamper: false };
+  const fpDiff = rootSnap
+    ? diffFingerprints(rootSnap, preMergeFp)
+    : {
+        ok: true,
+        changed: [],
+        hasGitInternalTamper: false,
+        hasGitFilterAttrTamper: false,
+        hasIdeAutorunTamper: false,
+        hasEnvOrRcTamper: false,
+        hasExecutableTamper: false
+      };
+
+  if (fpDiff.hasExecutableTamper && rootSnap) {
+    quarantineAndNeutralizeExecutableTamper(workspaceRoot, rootSnap);
+  }
 
   const gitState = await inspectGitWorkspace(workspaceRoot, { signal });
   if (!gitState.isGitRepo || !gitState.gitRoot) {
@@ -550,11 +641,9 @@ export async function mergeOrDiscardTaskBranch({
   const baseBranch = task.baseBranch || baseline?.baseBranch || 'main';
 
   if (action === 'discard') {
-    const restoredBaseline = baseline?.preCheckoutFingerprints
-      ? restoreSensitiveBaseline(workspaceRoot, baseline.preCheckoutFingerprints)
-      : baseline?.baselineFingerprints
-        ? restoreSensitiveBaseline(workspaceRoot, baseline.baselineFingerprints)
-        : { restored: [], deleted: [] };
+    const restoredBaseline = rootSnap
+      ? restoreSensitiveBaseline(workspaceRoot, rootSnap)
+      : { restored: [], deleted: [] };
 
     if (gitState.status.trackedModified.length > 0 && gitState.currentBranch === task.branch) {
       await execGitSafe(['reset', '--hard', 'HEAD'], { cwd: gitRoot, signal });
@@ -597,12 +686,27 @@ export async function mergeOrDiscardTaskBranch({
     );
   }
 
+  // Hard Non-Bypassable Block for Executable Tamper (Red-Team `锋` R2 Deep Fix):
+  // Any task that tampered with `.git/config`, `.git/hooks/**`, `.gitattributes`, or `.vscode/tasks.json`
+  // is permanently tainted and CANNOT be merged even with `acknowledgeCriticalTamper: true`!
+  if (task.hasUnmergeableExecutableTamper || fpDiff.hasExecutableTamper) {
+    throw new TeamIsolationError(
+      'TEAM_EXECUTABLE_TAMPER_UNMERGEABLE',
+      `合并门禁绝对封锁：任务 "${task.taskId}" 曾篡改可执行级 Git 内部配置/钩子/过滤器或 IDE 自动运行任务（已被网关隔离封存，详见 facts.quarantinedExecutableTamper）。此类被投毒分支严禁通过确认参数强行合入，唯一合法操作是调用 team_merge({ taskId: "${task.taskId}", action: "discard" }) 彻底销毁！`,
+      {
+        risk: task.risk,
+        hasUnmergeableExecutableTamper: true,
+        liveTamperedFingerprints: fpDiff.changed
+      }
+    );
+  }
+
   const recordedCriticalTamper = Array.isArray(task.risk) && task.risk.includes('CRITICAL_GIT_OR_ENV_TAMPERED');
   if (recordedCriticalTamper || !fpDiff.ok) {
     if (!acknowledgeRisks || !acknowledgeCriticalTamper) {
       throw new TeamIsolationError(
         'TEAM_CRITICAL_TAMPER_BLOCKED',
-        `合并门禁硬拦截：任务 "${task.taskId}" 触发 CRITICAL_GIT_OR_ENV_TAMPERED（敏感文件指纹异变：${fpDiff.changed.map((c) => c.displayPath).join(', ') || '见 facts.tamperedFingerprints'}）。请调用 team_inspect 彻查，通常应调用 team_merge(action="discard") 回滚；若确系预期变更，需同时传 acknowledgeRisks=true 与 acknowledgeCriticalTamper=true。`,
+        `合并门禁硬拦截：任务 "${task.taskId}" 触发 CRITICAL_GIT_OR_ENV_TAMPERED（敏感环境/包管理配置异变：${fpDiff.changed.map((c) => c.displayPath).join(', ') || '见 facts.tamperedFingerprints'}）。请调用 team_inspect 彻查，通常应调用 team_merge(action="discard") 回滚；若确系预期 .env/.npmrc 变更，需同时传 acknowledgeRisks=true 与 acknowledgeCriticalTamper=true。`,
         {
           risk: task.risk,
           liveTamperedFingerprints: fpDiff.changed

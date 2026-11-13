@@ -63,12 +63,6 @@ export function isJunkUntrackedFile(relPath) {
   return false;
 }
 
-/**
- * 3-tier lossless worker report extractor:
- * 1. Dedicated `.team/reports/<taskId>-a<attempt>.md` file written by the worker
- * 2. `orca orchestration worker-read --source=auto` structured transcript / terminal tail
- * 3. `worker_done` / `worker_blocked` mailbox body
- */
 export async function readWorkerAgentReport({
   reportFilePath,
   dispatchId,
@@ -164,6 +158,9 @@ export function buildAndSaveTaskReference({
   workspaceRoot,
   task,
   fpDiff,
+  quarantinedExecutableTamper = null,
+  gatewaySnapshot = null,
+  configDriftedDuringRun = null,
   changedFiles = [],
   diffStat = '',
   untrackedFiles = [],
@@ -204,12 +201,27 @@ export function buildAndSaveTaskReference({
   if (ignoredArtifacts.length > 0) {
     risk.push('IGNORED_ARTIFACTS_LEFT');
   }
-  if (task.mode === 'write' && changedFiles.length === 0 && !workerExitError) {
+  if (configDriftedDuringRun) {
+    risk.push('CONFIG_DRIFTED_DURING_RUN');
+  }
+  if (workerExitError && gatewaySnapshot?.autoCommitted) {
+    risk.push('PARTIAL_UNCOMMITTED_ON_ERROR');
+  }
+  if (task.mode === 'write' && changedFiles.length === 0 && !workerExitError && !fpDiff?.hasExecutableTamper) {
     risk.push('NO_EFFECTIVE_DIFF');
   }
   if (workerExitError) {
     risk.push('WORKER_EXIT_WITH_ERROR');
   }
+
+  const reviewIndependenceGrade =
+    task.role === 'reviewer'
+      ? task.familyConfidence === 'flag-verified'
+        ? 'flag-verified-strong'
+        : task.familyConfidence === 'config-inferred'
+          ? 'config-inferred-sandwich'
+          : 'unverified'
+      : null;
 
   const referencePath = join(workspaceRoot, '.team', 'references', `${task.taskId}.json`);
   const reference = {
@@ -227,6 +239,7 @@ export function buildAndSaveTaskReference({
     model: task.model,
     actualProviderFamily: task.actualProviderFamily,
     familyConfidence: task.familyConfidence,
+    ...(reviewIndependenceGrade ? { reviewIndependenceGrade } : {}),
     writerFamilies: task.writerFamilies || [],
     crossFamilyVerifiedAgainst: task.crossFamilyVerifiedAgainst || [],
     degradedFrom: task.degradedFrom || null,
@@ -235,6 +248,7 @@ export function buildAndSaveTaskReference({
     baseBranch: task.baseBranch || null,
     baseSha: task.baseSha || null,
     headSha: headSha || task.headSha || null,
+    hasUnmergeableExecutableTamper: Boolean(fpDiff?.hasExecutableTamper || task.hasUnmergeableExecutableTamper),
     facts: {
       diffStat: diffStat || '',
       changedFiles,
@@ -242,6 +256,9 @@ export function buildAndSaveTaskReference({
       ignoredArtifacts,
       highRiskModifiedFiles,
       tamperedFingerprints: fpDiff?.changed || [],
+      ...(quarantinedExecutableTamper ? { quarantinedExecutableTamper } : {}),
+      ...(gatewaySnapshot ? { gatewaySnapshot } : {}),
+      ...(configDriftedDuringRun ? { configDriftedDuringRun } : {}),
       readonlyDirtiedFiles,
       ...(readonlyDirtyPatch ? { readonlyDirtyPatch } : {}),
       ...(reviewedTarget ? { reviewedTarget } : {}),
@@ -271,6 +288,7 @@ export function buildAndSaveTaskReference({
     model: task.model,
     actualProviderFamily: task.actualProviderFamily,
     familyConfidence: task.familyConfidence,
+    ...(reviewIndependenceGrade ? { reviewIndependenceGrade } : {}),
     writerFamilies: task.writerFamilies || [],
     crossFamilyVerifiedAgainst: task.crossFamilyVerifiedAgainst || [],
     degradedFrom: task.degradedFrom || null,
@@ -278,6 +296,7 @@ export function buildAndSaveTaskReference({
     baseBranch: task.baseBranch || null,
     baseSha: task.baseSha || null,
     headSha: reference.headSha,
+    hasUnmergeableExecutableTamper: reference.hasUnmergeableExecutableTamper,
     facts: {
       diffStat: reference.facts.diffStat,
       changedFilesCount: changedFiles.length,
@@ -286,6 +305,9 @@ export function buildAndSaveTaskReference({
       ignoredArtifacts,
       highRiskModifiedFiles,
       tamperedFingerprints: reference.facts.tamperedFingerprints,
+      ...(quarantinedExecutableTamper ? { quarantinedExecutableTamper } : {}),
+      ...(gatewaySnapshot ? { gatewaySnapshot } : {}),
+      ...(configDriftedDuringRun ? { configDriftedDuringRun } : {}),
       readonlyDirtiedFiles
     },
     risk,

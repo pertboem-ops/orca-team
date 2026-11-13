@@ -13,6 +13,7 @@ import {
   settleWorkspaceAndReleaseLease
 } from './isolation.mjs';
 import { execOrca, releaseTeamWorker } from './orca-exec.mjs';
+import { inspectLiveCliRouting } from './probe.mjs';
 
 function createEmptyProjection() {
   return {
@@ -212,6 +213,48 @@ async function finalizeSettledWorkerTask({
     await releaseTeamWorker(task.orcaDispatchId, { cwd: workspaceRoot, signal });
   }
 
+  // Post-Settle Config-Sandwich TOCTOU Check (`t1`, Red-Team `锋` R1/R2 Deep Fix):
+  // If this worker used a `config-inferred` CLI (`pi`/`kimi`/`dsh`/`opencode`), re-read the live
+  // local config at `t1`. If the user or a script mutated the local CLI config during the run,
+  // downgrade `familyConfidence` to `'unknown'` and poison `writerFamilies` with `'unknown'` so
+  // cross-family review fails closed instead of trusting a stale `t0` guess!
+  let configDriftedDuringRun = null;
+  let effectiveFamilyConfidence = task.familyConfidence;
+  let effectiveWriterFamilies = Array.isArray(task.writerFamilies) ? [...task.writerFamilies] : [];
+
+  if (task.familyConfidence === 'config-inferred' && task.cli) {
+    const postLive = inspectLiveCliRouting(task.cli, null, workspaceRoot);
+    if (
+      postLive.actualProviderFamily !== task.actualProviderFamily ||
+      postLive.model !== task.model
+    ) {
+      configDriftedDuringRun = {
+        cli: task.cli,
+        atDispatch: {
+          model: task.model || null,
+          actualProviderFamily: task.actualProviderFamily || 'unknown'
+        },
+        atSettle: {
+          model: postLive.model || null,
+          actualProviderFamily: postLive.actualProviderFamily || 'unknown'
+        }
+      };
+      effectiveFamilyConfidence = 'unknown';
+      if (task.mode === 'write') {
+        const unionSet = new Set([
+          ...effectiveWriterFamilies,
+          task.actualProviderFamily,
+          postLive.actualProviderFamily,
+          'unknown'
+        ]);
+        unionSet.delete(null);
+        unionSet.delete(undefined);
+        unionSet.delete('');
+        effectiveWriterFamilies = [...unionSet];
+      }
+    }
+  }
+
   const targetTaskForReview =
     task.targetTaskId && state.tasks?.[task.targetTaskId] ? state.tasks[task.targetTaskId] : null;
 
@@ -222,10 +265,24 @@ async function finalizeSettledWorkerTask({
     signal
   });
 
+  const hasUnmergeableExecutableTamper = Boolean(
+    settledGit.fpDiff?.hasExecutableTamper || task.hasUnmergeableExecutableTamper
+  );
+
+  const effectiveTaskView = {
+    ...task,
+    familyConfidence: effectiveFamilyConfidence,
+    writerFamilies: effectiveWriterFamilies,
+    hasUnmergeableExecutableTamper
+  };
+
   const { referencePath, compactSummary, reference } = buildAndSaveTaskReference({
     workspaceRoot,
-    task,
+    task: effectiveTaskView,
     fpDiff: settledGit.fpDiff,
+    quarantinedExecutableTamper: settledGit.quarantinedExecutableTamper,
+    gatewaySnapshot: settledGit.gatewaySnapshot,
+    configDriftedDuringRun,
     changedFiles: settledGit.changedFiles,
     diffStat: settledGit.diffStat,
     untrackedFiles: settledGit.untrackedFiles,
@@ -243,6 +300,9 @@ async function finalizeSettledWorkerTask({
     taskId: task.taskId,
     payload: {
       headSha: settledGit.headSha,
+      familyConfidence: effectiveFamilyConfidence,
+      writerFamilies: effectiveWriterFamilies,
+      hasUnmergeableExecutableTamper,
       risk: reference.risk,
       referencePath,
       compactSummary,
@@ -281,16 +341,20 @@ export async function listOrphanTeamBranches(workspaceRoot, state, signal) {
  * Lazy 3-way reconciliation (`events.jsonl` x `Orca` x `Git`):
  * Invoked ONLY on state-sensitive entrypoints (`board`, `delegate`, `delegate_batch`,
  * `approve`, `steer`, `merge`, `interrupt`), never on pure local read tools (`inspect`, `from_protocol`).
+ * Short-circuits with ZERO subprocess spawns when no tasks are active and `includeOrphanBranches` is false!
  */
-export async function reconcileWorkspace(workspaceRoot, { waitMs = 0, signal } = {}) {
+export async function reconcileWorkspace(
+  workspaceRoot,
+  { waitMs = 0, includeOrphanBranches = false, signal } = {}
+) {
   let state = loadOrRebuildTeamState(workspaceRoot);
   const activeTasks = Object.values(state.tasks || {}).filter((t) =>
     ['RUNNING', 'AWAITING_APPROVAL', 'PENDING'].includes(t.status)
   );
 
-  if (state.orca?.coordinatorHandle && (activeTasks.length > 0 || waitMs > 0)) {
+  if (state.orca?.coordinatorHandle && activeTasks.length > 0) {
     const checkArgs = ['orchestration', 'check', `--for=${state.orca.coordinatorHandle}`, '--ack'];
-    if (waitMs > 0 && activeTasks.length > 0) {
+    if (waitMs > 0) {
       checkArgs.push('--wait', `--timeout-ms=${Math.max(200, Math.min(waitMs, 55_000))}`);
     }
 
@@ -433,7 +497,9 @@ export async function reconcileWorkspace(workspaceRoot, { waitMs = 0, signal } =
     }
   }
 
-  const orphanBranches = await listOrphanTeamBranches(workspaceRoot, state, signal);
+  const orphanBranches = includeOrphanBranches
+    ? await listOrphanTeamBranches(workspaceRoot, state, signal)
+    : [];
   return {
     state,
     lease: readWorkspaceLease(workspaceRoot),

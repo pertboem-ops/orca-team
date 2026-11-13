@@ -7,13 +7,13 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
-  statSync,
   writeFileSync
 } from 'node:fs';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 
 const MAX_FINGERPRINT_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_BACKUP_FILE_BYTES = 64 * 1024;
+const MAX_QUARANTINE_PREVIEW_CHARS = 2048;
 
 const IGNORED_TEAM_PREFIXES = ['.team/', '.team', '.cabinet/', '.cabinet'];
 
@@ -147,14 +147,20 @@ function walkHooksDir(dirPath, prefixKey, entries, includeBackup) {
   }
 }
 
-function isSensitiveWorktreeFilename(name) {
-  if (name === '.gitattributes' || name === '.npmrc' || name === '.yarnrc' || name === '.yarnrc.yml') {
-    return true;
+function classifySensitiveWorktreeFile(relPath, fileName) {
+  if (fileName === '.gitattributes') {
+    return 'git_filter_attr';
   }
-  if (name === '.env' || name.startsWith('.env.')) {
-    return true;
+  if (relPath === '.vscode/tasks.json' || relPath === '.vscode/settings.json') {
+    return 'ide_autorun';
   }
-  return false;
+  if (fileName === '.npmrc' || fileName === '.yarnrc' || fileName === '.yarnrc.yml') {
+    return 'env_or_rc';
+  }
+  if (fileName === '.env' || fileName.startsWith('.env.')) {
+    return 'env_or_rc';
+  }
+  return null;
 }
 
 function walkWorktreeSensitiveFiles(rootDir, currentDir, depth, maxDepth, entries) {
@@ -181,11 +187,14 @@ function walkWorktreeSensitiveFiles(rootDir, currentDir, depth, maxDepth, entrie
     const full = join(currentDir, item.name);
     if (item.isDirectory()) {
       walkWorktreeSensitiveFiles(rootDir, full, depth + 1, maxDepth, entries);
-    } else if (isSensitiveWorktreeFilename(item.name)) {
+    } else {
       const rel = toPosixRel(relative(rootDir, full));
-      const hashed = hashFileEntry(full, 'env_or_rc', true);
-      if (hashed) {
-        entries[`worktree:${rel}`] = { ...hashed, relPath: rel, absPath: full };
+      const category = classifySensitiveWorktreeFile(rel, item.name);
+      if (category) {
+        const hashed = hashFileEntry(full, category, true);
+        if (hashed) {
+          entries[`worktree:${rel}`] = { ...hashed, relPath: rel, absPath: full };
+        }
       }
     }
   }
@@ -193,8 +202,11 @@ function walkWorktreeSensitiveFiles(rootDir, currentDir, depth, maxDepth, entrie
 
 /**
  * Capture raw SHA-256 fingerprints BEFORE invoking any `git` subprocess.
- * Covers `.git/config`, `.git/hooks/**`, `.git/info/attributes`, `.git/info/exclude`,
- * plus worktree `.gitattributes`, `.env*`, `.npmrc`, `.yarnrc*`.
+ * Covers:
+ * - `git_internal`: `.git/config`, `.git/hooks/**`, `.git/info/attributes`, `.git/info/exclude`
+ * - `git_filter_attr`: `.gitattributes` (can bind executable `filter.<driver>.clean/smudge` commands!)
+ * - `ide_autorun`: `.vscode/tasks.json`, `.vscode/settings.json` (`folderOpen` task / compiler hijack, often gitignored!)
+ * - `env_or_rc`: `.env*`, `.npmrc`, `.yarnrc*`
  */
 export function captureSensitiveFingerprints(workspacePath, { includeBackup = true } = {}) {
   const layout = findGitLayoutSync(workspacePath);
@@ -282,19 +294,88 @@ export function diffFingerprints(beforeSnap, afterSnap) {
   }
 
   const hasGitInternalTamper = changed.some((c) => c.category === 'git_internal');
+  const hasGitFilterAttrTamper = changed.some((c) => c.category === 'git_filter_attr');
+  const hasIdeAutorunTamper = changed.some((c) => c.category === 'ide_autorun');
   const hasEnvOrRcTamper = changed.some((c) => c.category === 'env_or_rc');
+
+  // RCE-capable tamper categories that MUST be quarantined & neutralized BEFORE spawning `git add` or returning to IDE!
+  const hasExecutableTamper =
+    hasGitInternalTamper || hasGitFilterAttrTamper || hasIdeAutorunTamper;
 
   return {
     ok: changed.length === 0,
     changed,
     hasGitInternalTamper,
-    hasEnvOrRcTamper
+    hasGitFilterAttrTamper,
+    hasIdeAutorunTamper,
+    hasEnvOrRcTamper,
+    hasExecutableTamper
   };
 }
 
 /**
- * Restore tampered `.git/config`, `.git/hooks/**`, `.git/info/*`, and untracked `.env*`/`.npmrc`
- * from the baseline snapshot when discarding/aborting a rogue or failed task.
+ * Immediate Pre-Git Quarantine & Neutralization (Red-Team `锋` R2 Deep Fix):
+ * When `.git/config`, `.git/hooks/**`, `.gitattributes`, or `.vscode/tasks.json` is tampered with,
+ * do NOT leave the poisoned payload sitting in `.git/` while waiting for `team_merge(discard)`
+ * (where VS Code / Antigravity's background `git status` polling would trigger RCE within seconds!).
+ * Instead, capture forensic previews in pure Node and IMMEDIATELY restore clean baseline bytes!
+ */
+export function quarantineAndNeutralizeExecutableTamper(workspacePath, baselineSnap) {
+  if (!baselineSnap?.entries) {
+    return { quarantined: [], restored: [], deleted: [] };
+  }
+  const currentSnap = captureSensitiveFingerprints(workspacePath, { includeBackup: false });
+  const diff = diffFingerprints(baselineSnap, currentSnap);
+
+  const quarantined = [];
+  const restored = [];
+  const deleted = [];
+
+  for (const item of diff.changed) {
+    if (!['git_internal', 'git_filter_attr', 'ide_autorun'].includes(item.category)) {
+      continue;
+    }
+    const baseEntry = baselineSnap.entries[item.key];
+    const currEntry = currentSnap.entries[item.key];
+
+    let forensicPreview = null;
+    if (currEntry?.absPath && existsSync(currEntry.absPath)) {
+      try {
+        forensicPreview = readFileSync(currEntry.absPath, 'utf8').slice(0, MAX_QUARANTINE_PREVIEW_CHARS);
+      } catch {}
+    }
+
+    quarantined.push({
+      key: item.key,
+      displayPath: item.displayPath,
+      category: item.category,
+      change: item.change,
+      forensicPreview
+    });
+
+    if (item.change === 'added' && currEntry?.absPath && existsSync(currEntry.absPath)) {
+      try {
+        rmSync(currEntry.absPath, { force: true });
+        deleted.push(item.displayPath);
+      } catch {}
+    } else if (
+      (item.change === 'modified' || item.change === 'deleted') &&
+      baseEntry?.backupBase64 &&
+      baseEntry?.absPath
+    ) {
+      try {
+        mkdirSync(dirname(baseEntry.absPath), { recursive: true });
+        writeFileSync(baseEntry.absPath, Buffer.from(baseEntry.backupBase64, 'base64'));
+        restored.push(item.displayPath);
+      } catch {}
+    }
+  }
+
+  return { quarantined, restored, deleted };
+}
+
+/**
+ * Restore ALL tampered sensitive baseline files (including `.env*` / `.npmrc`) on `discard` / `interrupt`.
  */
 export function restoreSensitiveBaseline(workspacePath, baselineSnap) {
   if (!baselineSnap?.entries) return { restored: [], deleted: [] };
@@ -327,20 +408,29 @@ export function restoreSensitiveBaseline(workspacePath, baselineSnap) {
 
 /**
  * Hardened Git CLI wrapper:
- * Every git invocation prepends `-c core.hooksPath= -c core.fsmonitor=false -c core.quotepath=false`
- * so repository-local hooks or `core.fsmonitor` injections can NEVER execute inside the gateway.
+ * Every git invocation prepends `--no-pager` and disables `core.hooksPath`, `core.fsmonitor`,
+ * `core.editor`, `diff.external`, and `protocol.file.allow` so repository-local config injections
+ * can NEVER execute arbitrary commands inside the gateway.
  */
 export async function execGitSafe(gitArgs, options = {}) {
   const { cwd = process.cwd(), timeoutMs = 20_000, signal } = options;
 
+  const safeSubArgs =
+    gitArgs[0] === 'diff' && !gitArgs.includes('--no-ext-diff')
+      ? ['diff', '--no-ext-diff', '--no-textconv', ...gitArgs.slice(1)]
+      : gitArgs;
+
   const hardenedArgs = [
+    '--no-pager',
     '-c',
     'core.hooksPath=',
     '-c',
     'core.fsmonitor=false',
     '-c',
     'core.quotepath=false',
-    ...gitArgs
+    '-c',
+    'protocol.file.allow=never',
+    ...safeSubArgs
   ];
 
   return await new Promise((resolvePromise) => {
@@ -349,6 +439,7 @@ export async function execGitSafe(gitArgs, options = {}) {
       env: {
         ...process.env,
         GIT_TERMINAL_PROMPT: '0',
+        GIT_PAGER: 'cat',
         LC_ALL: 'C.UTF-8'
       },
       shell: false,
@@ -421,9 +512,6 @@ function unquoteGitPath(raw) {
   return trimmed;
 }
 
-/**
- * Parse `git status --porcelain=v1 -uall` output while excluding `.team/` and `.cabinet/`.
- */
 export function parsePorcelainStatus(rawPorcelain) {
   if (!rawPorcelain) {
     return { entries: [], trackedModified: [], untracked: [], ignored: [] };

@@ -39,7 +39,6 @@ export function inferModelFamilyFromId(modelId) {
   const raw = modelId.trim().toLowerCase();
   if (!raw) return 'unknown';
 
-  // Strip provider prefix (e.g. `qwen-token-plan-cn/qwen3.8-max` -> `qwen3.8-max`)
   const tail = raw.includes('/') ? raw.split('/').pop() : raw;
 
   if (tail.includes('claude') || tail.includes('sonnet') || tail.includes('opus') || tail.includes('haiku')) {
@@ -92,8 +91,8 @@ function getCliTestOverrides() {
 }
 
 /**
- * Real-time dispatch-time config reader (never trusts the 5-min readiness cache for family identity).
- * Returns `{ model, actualProviderFamily, familyConfidence: "flag-verified" | "config-inferred" | "unknown" }`.
+ * Real-time CLI config reader (invoked BOTH at pre-dispatch `t0` AND at post-settle `t1`
+ * to form a TOCTOU config-sandwich check per Red-Team `锋` R2 critique!).
  */
 export function inspectLiveCliRouting(cli, explicitModel = null, workspaceRoot = null) {
   const testOverrides = getCliTestOverrides();
@@ -168,15 +167,40 @@ export function inspectLiveCliRouting(cli, explicitModel = null, workspaceRoot =
   }
 
   if (cli === 'dsh') {
+    // Verified against real `~/.dsh` layout (`profiles/dsh-tui/package.json` + `cordis.patch.yml` + `llm-deepseek`)
     const dshDir = join(home, '.dsh');
-    if (existsSync(dshDir)) {
-      const dshCfg =
-        readJsonSafe(join(dshDir, 'config.json')) || readJsonSafe(join(dshDir, 'settings.json'));
-      const modelId = dshCfg?.model || dshCfg?.defaultModel || 'deepseek-official/deepseek-flash';
-      const fam = inferModelFamilyFromId(modelId);
+    if (!existsSync(dshDir)) {
+      return { model: null, actualProviderFamily: 'unknown', familyConfidence: 'unknown' };
+    }
+    const profilePkg = readJsonSafe(join(dshDir, 'profiles', 'dsh-tui', 'package.json'));
+    const bundles = profilePkg?.dsh?.profile?.bundles || [];
+    const hasOfficialDeepseekBase =
+      bundles.includes('@deepseek-ai/dsh-base') || existsSync(join(dshDir, 'llm-deepseek'));
+
+    // Check if user patched in any non-deepseek LLM plugin in cordis.patch.yml
+    const patchPaths = [
+      join(dshDir, 'cordis.patch.yml'),
+      join(dshDir, 'profiles', 'dsh-tui', 'cordis.patch.yml')
+    ];
+    for (const p of patchPaths) {
+      if (!existsSync(p)) continue;
+      try {
+        const patchTxt = readFileSync(p, 'utf8').toLowerCase();
+        if (
+          patchTxt.includes('anthropic') ||
+          patchTxt.includes('openai') ||
+          patchTxt.includes('qwen') ||
+          patchTxt.includes('moonshot')
+        ) {
+          return { model: 'dsh-custom-patched', actualProviderFamily: 'unknown', familyConfidence: 'unknown' };
+        }
+      } catch {}
+    }
+
+    if (hasOfficialDeepseekBase) {
       return {
-        model: modelId,
-        actualProviderFamily: fam !== 'unknown' ? fam : 'deepseek',
+        model: 'deepseek-official/dsh-default',
+        actualProviderFamily: 'deepseek',
         familyConfidence: 'config-inferred'
       };
     }
@@ -374,7 +398,7 @@ export async function probeCliEnvironment({ forceRefresh = false, workspaceRoot 
 
   const piSettings = readJsonSafe(join(home, '.pi', 'agent', 'settings.json'));
   const piAuthExists = existsSync(join(home, '.pi', 'agent', 'auth.json'));
-  const dshDirExists = existsSync(join(home, '.dsh'));
+  const dshCredsExists = existsSync(join(home, '.dsh', '.credentials.yaml')) || existsSync(join(home, '.dsh'));
   const kimiLocalConfigExists =
     existsSync(join(home, '.kimi-code', 'config.toml')) || existsSync(join(home, '.kimi', 'config.toml'));
   const kimiLocalCredsExists =
@@ -394,7 +418,7 @@ export async function probeCliEnvironment({ forceRefresh = false, workspaceRoot 
     Boolean(kimiBin) &&
     (rateLimits.kimi?.status === 'ok' || Boolean(kimiLocalConfigExists && (kimiLocalCredsExists || kimiLive.model)));
   const piReady = Boolean(piBin) && (piAuthExists || Boolean(piSettings?.defaultProvider));
-  const dshReady = Boolean(dshBin) && dshDirExists;
+  const dshReady = Boolean(dshBin) && dshCredsExists && dshLive.actualProviderFamily !== 'unknown';
   const claudeReady = Boolean(claudeBin) && rateLimits.claude?.status === 'ok';
   const codexReady =
     Boolean(codexBin) &&

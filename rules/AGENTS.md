@@ -14,9 +14,11 @@
 - **主控验收与合入必须以 `facts` 和 `risk[]` 为唯一准绳**，绝不盲信子 Agent 自述。
 
 ## 3. 铁律三：反盲批与篡改硬拦截（`team_approve` / `team_merge`）
-- 若任务命中 `CRITICAL_GIT_OR_ENV_TAMPERED`（例如 `.git/config`、`hooks` 或 `.env` 被篡改），**严禁盲目放行或合入**！必须立即调用 `team_inspect` 彻查篡改明细，确认系攻击或误改后调用 `team_merge({ taskId, action: "discard" })` 回滚恢复基线。
-- 若命中 `HIGH_RISK_FILE_MODIFIED`（如修改了 `package.json`、lockfile、CI 配置），必须先调用 `team_inspect({ taskId, includeFullDiff: true })` 逐行核查 Diff 无脚本注入后，方可携带 `acknowledgeHighRiskDiff: true`（`team_approve`）或 `acknowledgeRisks: true`（`team_merge`）显式放行。
+- 若任务命中 `CRITICAL_GIT_OR_ENV_TAMPERED`：
+  - 凡涉及可执行级配置/钩子篡改（`hasUnmergeableExecutableTamper: true`，如 `.git/config`、`.git/hooks/**`、`.gitattributes`、`.vscode/tasks.json`），网关已在 `REPORTED` 瞬间通过纯 Node 隔离取证并还原洁净基线，且**永久封锁合入（`TEAM_EXECUTABLE_TAMPER_UNMERGEABLE`）**，必须调用 `team_merge({ taskId, action: "discard" })` 销毁毒化分支；
+  - 若系 `.env*` / `.npmrc` 异变，必须先调用 `team_inspect` 彻查，非预期改动一律 `discard`。
+- 若命中 `HIGH_RISK_FILE_MODIFIED`、`CONFIG_DRIFTED_DURING_RUN` 或 `PARTIAL_UNCOMMITTED_ON_ERROR`，必须先调用 `team_inspect({ taskId, includeFullDiff: true })` 逐行核查 Diff，确认安全后方可显式确认放行。
 
-## 4. 铁律四：写审异源对冲与防漂移合入
-- 对核心编码/重构任务处于 `REPORTED` 后，应调用 `team_delegate({ type: "review", targetTaskId, title, task })` 发起异源代码审查（网关自动跳过该分支全部写 `attempt` 的模型家族，确保跨家族独立互审）。
+## 4. 铁律四：分支谱系写审异源对冲与防漂移合入
+- 对核心编码/重构任务处于 `REPORTED` 后，应调用 `team_delegate({ type: "review", targetTaskId, title, task })` 发起异源代码审查（网关自动跳过该共享分支谱系上全部写任务、全部 `attempt` 的模型家族并集，并在 `t0/t1` 双端校验本地配置未漂移，确保跨家族独立互审）。
 - 审查发现小问题时，调用 `team_steer({ taskId, instruction })` 在同一 `team/<taskId>` 分支携带客观 Diff 冷启动返工；验收通过后调用 `team_merge({ taskId, action: "merge", strategy: "no-ff" })` 受控合入并自动清理临时分支。

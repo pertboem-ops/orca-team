@@ -13,12 +13,12 @@
 1. **5 大工程角色确定性路由 + 三级自动降级（5 款本机异构 CLI）**：
    - 内置 `architect`（只读）、`coder-fast`（受控写）、`coder-pro`（攻坚写）、`reviewer`（只读·强制异源）、`tester`（受控写）；
    - 适配本机实证的 `antigravity`（`--model`/`--effort` 强传参）+ `kimi` (`moonshot`) + `pi` (`qwen`) + `dsh` (`deepseek`) + `opencode` 异构池，单 CLI 离线或未登录时自动沿 `primary → fallback1 → fallback2` 无缝降级。
-2. **证据分级的写审异源避让门禁（Fail-Closed）**：
-   - 每次派发实时鲜读 CLI 本地配置，记录 `actualProviderFamily` 与 `familyConfidence`（`flag-verified` | `config-inferred` | `unknown`）；
-   - 维护任务全生命周期 `writerFamilies` 并集，`reviewer` 强制跳过目标分支所有写模型家族及 `unknown`，无可用异源候选时直接 `TEAM_CROSS_FAMILY_UNAVAILABLE` 阻断，杜绝同源盲区互审。
-3. **前置原始文件 SHA-256 指纹防线 + 免疫型 Git 封装**：
-   - 在调用**任何** `git` 子进程前，先使用 Node 原生 `fs` + `crypto` 对 `.git/config`、`.git/hooks/**`、`.git/info/*`、`.gitattributes`、`.env*`、`.npmrc`、`.yarnrc*` 做 SHA-256 指纹比对；
-   - 网关所有 `git` 命令强制前置 `-c core.hooksPath= -c core.fsmonitor=false`，彻底阻断恶意 Worker 通过篡改 `.git/config` (`core.fsmonitor`) 在门禁执行 `git status` 时触发 RCE 的供应链攻击链。
+2. **证据分级的分支谱系写审异源门禁（Fail-Closed + `t0/t1` 双端配置夹击校验）**：
+   - 在派发前 `t0` 与结算时 `t1` 双端鲜读 CLI 本地配置（防运行期配置篡改 TOCTOU 漂移），记录 `actualProviderFamily`、`familyConfidence` 与 `reviewIndependenceGrade`；
+   - 自动聚合共享分支谱系（含 `reuseBranchOfTaskId` 与多轮 `team_steer`）全生命周期 `writerFamilies` 并集，`reviewer` 强制跳过所有写模型家族及 `unknown`，无可用异源候选时直接 `TEAM_CROSS_FAMILY_UNAVAILABLE` 阻断。
+3. **前置原始文件 SHA-256 即时隔离防线 + 免疫型 Git 封装**：
+   - 沿分支根基线（`rootFingerprints`）在调用**任何** `git` 子进程前，使用 Node 原生 `fs` + `crypto` 对 `.git/config`、`.git/hooks/**`、`.git/info/*`、`.gitattributes`、`.vscode/{tasks,settings}.json`、`.env*`、`.npmrc` 做 SHA-256 指纹比对；
+   - 一旦检测到可执行级篡改（如 `core.fsmonitor` 注入），在 `REPORTED` 瞬间即由纯 Node 留存取证片段并**当场还原洁净字节**（防宿主 IDE 后台 `git status` 秒级引爆 RCE），且永久封锁合入（`TEAM_EXECUTABLE_TAMPER_UNMERGEABLE`）；网关所有 `git` 命令强制前置 `-c core.hooksPath= -c core.fsmonitor=false`。
 4. **主工作树全角色独占租约 + `REPORTED` 原子回基 + 冷启动 `steer`**：
    - 100% 零拷贝复用主目录 `node_modules` / `.venv`，Windows 下秒跑单测；
    - Worker 结束进入 `REPORTED` 时立即 `worker-release` 销毁终端防僵尸驻留，将分支改动快照固化至 `team/<taskId>` 后原子切回 `baseBranch` 释放主树租约，无缝解锁后续 `reviewer` 检出审查与 `team_steer` 冷启动返工。

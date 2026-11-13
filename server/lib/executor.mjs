@@ -183,6 +183,7 @@ async function launchPreparedTask({
     type: taskDraft.type,
     hard: Boolean(taskDraft.hard),
     targetTask,
+    state,
     probe,
     workspaceRoot
   });
@@ -239,6 +240,7 @@ async function launchPreparedTask({
         taskId: taskDraft.taskId,
         payload: {
           taskId: taskDraft.taskId,
+          rootBaselineTaskId: iso.rootBaselineTaskId || taskDraft.taskId,
           status: 'PENDING',
           title: taskDraft.title,
           task: taskDraft.task,
@@ -343,6 +345,10 @@ async function launchPreparedTask({
   }
 }
 
+function hasQueuedTasks(state) {
+  return (state?.taskOrder || []).some((id) => state?.tasks?.[id]?.status === 'QUEUED');
+}
+
 async function promoteNextQueuedTaskIfIdle(workspaceRoot, signal) {
   if (readWorkspaceLease(workspaceRoot)) return loadOrRebuildTeamState(workspaceRoot);
   const state = loadOrRebuildTeamState(workspaceRoot);
@@ -359,16 +365,29 @@ async function promoteNextQueuedTaskIfIdle(workspaceRoot, signal) {
   });
 }
 
-async function waitForTasksProgress(workspaceRoot, { targetTaskIds, waitSeconds, signal }) {
+async function waitForTasksProgress(
+  workspaceRoot,
+  { targetTaskIds, waitSeconds, includeOrphanBranches = false, signal }
+) {
   const sliceCapMs =
     process.env.ORCA_TEAM_POLL_SLICE_MS !== undefined
       ? Number(process.env.ORCA_TEAM_POLL_SLICE_MS)
       : 4_000;
 
   const deadline = Date.now() + waitSeconds * 1000;
-  let reconciled = await reconcileWorkspace(workspaceRoot, { waitMs: 0, signal });
-  await promoteNextQueuedTaskIfIdle(workspaceRoot, signal);
-  reconciled = await reconcileWorkspace(workspaceRoot, { waitMs: 0, signal });
+  let reconciled = await reconcileWorkspace(workspaceRoot, {
+    waitMs: 0,
+    includeOrphanBranches,
+    signal
+  });
+  if (!reconciled.lease && hasQueuedTasks(reconciled.state)) {
+    await promoteNextQueuedTaskIfIdle(workspaceRoot, signal);
+    reconciled = await reconcileWorkspace(workspaceRoot, {
+      waitMs: 0,
+      includeOrphanBranches,
+      signal
+    });
+  }
 
   const isSettledOrActionable = (st) =>
     targetTaskIds.every((id) => {
@@ -386,10 +405,18 @@ async function waitForTasksProgress(workspaceRoot, { targetTaskIds, waitSeconds,
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) break;
     const waitChunk = Math.min(remainingMs, Math.max(150, sliceCapMs));
-    reconciled = await reconcileWorkspace(workspaceRoot, { waitMs: waitChunk, signal });
-    if (!readWorkspaceLease(workspaceRoot)) {
+    reconciled = await reconcileWorkspace(workspaceRoot, {
+      waitMs: waitChunk,
+      includeOrphanBranches,
+      signal
+    });
+    if (!reconciled.lease && hasQueuedTasks(reconciled.state)) {
       await promoteNextQueuedTaskIfIdle(workspaceRoot, signal);
-      reconciled = await reconcileWorkspace(workspaceRoot, { waitMs: 0, signal });
+      reconciled = await reconcileWorkspace(workspaceRoot, {
+        waitMs: 0,
+        includeOrphanBranches,
+        signal
+      });
     }
   }
 
@@ -530,13 +557,22 @@ export async function executeTeamTool(toolName, args = {}, signal) {
           reconciled = await waitForTasksProgress(workspaceRoot, {
             targetTaskIds: [args.taskId],
             waitSeconds,
+            includeOrphanBranches: true,
             signal
           });
         } else {
-          reconciled = await reconcileWorkspace(workspaceRoot, { waitMs: 0, signal });
-          if (!reconciled.lease) {
+          reconciled = await reconcileWorkspace(workspaceRoot, {
+            waitMs: 0,
+            includeOrphanBranches: true,
+            signal
+          });
+          if (!reconciled.lease && hasQueuedTasks(reconciled.state)) {
             await promoteNextQueuedTaskIfIdle(workspaceRoot, signal);
-            reconciled = await reconcileWorkspace(workspaceRoot, { waitMs: 0, signal });
+            reconciled = await reconcileWorkspace(workspaceRoot, {
+              waitMs: 0,
+              includeOrphanBranches: true,
+              signal
+            });
           }
         }
 
@@ -689,6 +725,7 @@ export async function executeTeamTool(toolName, args = {}, signal) {
             type: item.type,
             hard: Boolean(item.hard),
             targetTask: item.targetTaskId ? reconciled.state.tasks?.[item.targetTaskId] : null,
+            state: reconciled.state,
             probe,
             workspaceRoot
           });

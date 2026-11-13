@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "asOf": "2026-11-04",
+  "asOf": "2026-11-13",
   "maxBatchSize": 4,
   "defaultWaitSeconds": 20,
   "maxWaitSeconds": 55,
@@ -127,7 +127,8 @@
       "title": "异源审查官 (Reviewer)",
       "mode": "readonly",
       "enforceCrossFamily": true,
-      "description": "负责对目标写任务分支执行跨模型家族独立代码审查与安全审计（严格只读，自动避开目标分支全部写 attempt 家族，无异源候选时 fail-closed）。",
+      "preferFlagVerified": true,
+      "description": "负责对目标写任务分支执行跨模型家族独立代码审查与安全审计（严格只读，自动避开目标分支谱系全部写任务与 attempt 家族，无异源候选时 fail-closed）。",
       "tiers": {
         "normal": [
           { "cli": "antigravity", "model": "gpt-oss-120b-medium", "effort": "medium", "expectedFamily": "openai-oss" },
@@ -188,6 +189,9 @@
     ".gitignore",
     ".github/**",
     ".husky/**",
+    ".vscode/**",
+    ".idea/**",
+    "*.code-workspace",
     "Makefile",
     "Dockerfile",
     "docker-compose*.yml",

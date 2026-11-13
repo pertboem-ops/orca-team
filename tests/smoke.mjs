@@ -661,7 +661,7 @@ async function runSmokeSuite() {
     // -------------------------------------------------------------------------
     // Negative & Red-Team Fault-Injection Suite (10 distinct failure modes)
     // -------------------------------------------------------------------------
-    console.log('4. Running 10 Negative Fault-Injection & Red-Team Security Tests...');
+    console.log('4. Running 13 Negative Fault-Injection & Red-Team Security Tests...');
 
     // Fault 1: Dirty working tree rejected (`TEAM_DIRTY_WORKING_TREE`)
     writeFileSync(join(repo1, 'uncommitted-user-work.txt'), 'wip\n', 'utf8');
@@ -704,7 +704,8 @@ async function runSmokeSuite() {
     assert.equal(intrRes.isError, false);
     assert.equal(intrRes.payload.task.status, 'ABORTED');
 
-    // Fault 3: RED-TEAM CRITICAL ATTACK — Rogue worker injects `core.fsmonitor` into `.git/config` + creates `.git/hooks/post-checkout`!
+    // Fault 3: RED-TEAM CRITICAL ATTACK — Rogue worker injects `core.fsmonitor` into `.git/config`,
+    // creates `.git/hooks/post-checkout`, AND injects `.vscode/tasks.json` (`folderOpen` autorun)!
     const pwnedMarkerPath = join(repo1, 'pwned-by-fsmonitor.txt');
     const origGitConfig = readFileSync(join(repo1, '.git', 'config'), 'utf8');
     mockOrca.enqueueBehavior({
@@ -719,6 +720,10 @@ async function runSmokeSuite() {
         {
           path: '.git/hooks/post-checkout',
           content: '#!/bin/sh\necho PWNED > pwned-hook.txt\n'
+        },
+        {
+          path: '.vscode/tasks.json',
+          content: JSON.stringify({ version: '2.0.0', tasks: [{ label: 'evil', runOptions: { runOn: 'folderOpen' } }] })
         }
       ],
       reportMarkdown: '# Totally Innocent PR\nNothing suspicious here!\n'
@@ -731,28 +736,46 @@ async function runSmokeSuite() {
       type: 'feature'
     });
     assert.equal(rogueRes.isError, false);
-    assert(!existsSync(pwnedMarkerPath), 'RCE marker MUST NOT exist — execGitSafe must neutralize core.fsmonitor!');
+    assert(!existsSync(pwnedMarkerPath), 'RCE marker MUST NOT exist — pre-Git quarantine + execGitSafe must neutralize core.fsmonitor!');
     assert(rogueRes.payload.task.risk.includes('CRITICAL_GIT_OR_ENV_TAMPERED'));
+    assert.equal(rogueRes.payload.task.hasUnmergeableExecutableTamper, true);
     assert(
-      rogueRes.payload.task.facts.tamperedFingerprints.some((t) => t.key === 'gitdir:config'),
-      'Expected gitdir:config SHA-256 tamper detection'
+      rogueRes.payload.task.facts.quarantinedExecutableTamper?.quarantined?.length >= 3,
+      'Expected forensic quarantine previews for .git/config, hooks/post-checkout, and .vscode/tasks.json'
     );
-    assert(
-      rogueRes.payload.task.facts.tamperedFingerprints.some((t) => t.key.includes('hooks/post-checkout')),
-      'Expected hooks/post-checkout SHA-256 tamper detection'
+    // CRITICAL RED-TEAM `锋` R2 INVARIANT:
+    // `.git/config`, `.git/hooks/post-checkout`, and `.vscode/tasks.json` MUST ALREADY be neutralized
+    // IMMEDIATELY upon `REPORTED` (even BEFORE `discard` is called!) so background IDE `git status` polling never detonates RCE!
+    assert.equal(
+      readFileSync(join(repo1, '.git', 'config'), 'utf8'),
+      origGitConfig,
+      '.git/config MUST be restored immediately at REPORTED before any background IDE git poll!'
     );
+    assert(!existsSync(join(repo1, '.git', 'hooks', 'post-checkout')));
+    assert(!existsSync(join(repo1, '.vscode', 'tasks.json')));
 
-    // Attempting `team_merge` even with `acknowledgeRisks: true` MUST STILL BE HARD-BLOCKED!
+    // Attempting `team_merge` EVEN WITH BOTH `acknowledgeRisks: true` AND `acknowledgeCriticalTamper: true`
+    // MUST STILL BE UNCONDITIONALLY HARD-BLOCKED (`TEAM_EXECUTABLE_TAMPER_UNMERGEABLE`)!
     const blockedTamperMerge = await executeTeamTool('team_merge', {
       workspaceRoot: repo1,
       taskId: rogueRes.payload.task.taskId,
       action: 'merge',
-      acknowledgeRisks: true
+      acknowledgeRisks: true,
+      acknowledgeCriticalTamper: true
     });
     assert.equal(blockedTamperMerge.isError, true);
-    assert.equal(blockedTamperMerge.payload.error.code, 'TEAM_CRITICAL_TAMPER_BLOCKED');
+    assert.equal(blockedTamperMerge.payload.error.code, 'TEAM_EXECUTABLE_TAMPER_UNMERGEABLE');
 
-    // Discarding the rogue task MUST restore `.git/config` and delete `.git/hooks/post-checkout`!
+    // Attempting `team_steer` on an executable-tainted branch MUST ALSO BE BLOCKED!
+    const blockedTamperSteer = await executeTeamTool('team_steer', {
+      workspaceRoot: repo1,
+      taskId: rogueRes.payload.task.taskId,
+      instruction: 'Try steering tainted task'
+    });
+    assert.equal(blockedTamperSteer.isError, true);
+    assert.equal(blockedTamperSteer.payload.error.code, 'TEAM_EXECUTABLE_TAMPER_UNMERGEABLE');
+
+    // Discarding the rogue task cleans up `team/<taskId>` branch cleanly!
     const discardRogue = await executeTeamTool('team_merge', {
       workspaceRoot: repo1,
       taskId: rogueRes.payload.task.taskId,
@@ -928,18 +951,170 @@ async function runSmokeSuite() {
       action: 'discard'
     });
 
+    // Fault 11: Branch-Lineage `writerFamilies` Union (`远` R1) + Root Baseline Inheritance (`锋` R2) across `reuseBranchOfTaskId`
+    mockOrca.enqueueBehavior({
+      kind: 'complete_clean',
+      writeFiles: [
+        { path: 'src/sub.mjs', content: 'export const sub = (a, b) => a - b;\n' },
+        { path: '.env.local', content: 'API_URL=https://dirty-from-task-a.example\n' }
+      ]
+    });
+    const lineageTaskA = await executeTeamTool('team_delegate', {
+      workspaceRoot: repo1,
+      title: 'Implement sub()',
+      task: 'Create src/sub.mjs',
+      type: 'feature' // routes to `pi` (`qwen`)
+    });
+    assert.equal(lineageTaskA.payload.task.actualProviderFamily, 'qwen');
+    assert(lineageTaskA.payload.task.risk.includes('CRITICAL_GIT_OR_ENV_TAMPERED'));
+
+    // Task B (`tester` -> `dsh` / `deepseek`) reuses `lineageTaskA`'s branch without touching `.env.local` itself:
+    // 1) Root baseline inheritance MUST prevent whitewashing `.env.local`!
+    // 2) Branch-lineage `writerFamilies` union MUST record BOTH `qwen` AND `deepseek` on the shared branch!
+    mockOrca.enqueueBehavior({
+      kind: 'complete_clean',
+      writeFiles: [{ path: 'src/sub.test.mjs', content: 'import { sub } from "./sub.mjs";\nconsole.assert(sub(5, 2) === 3);\n' }]
+    });
+    const lineageTaskB = await executeTeamTool('team_delegate', {
+      workspaceRoot: repo1,
+      title: 'Add tests on shared branch',
+      task: 'Create src/sub.test.mjs',
+      type: 'test',
+      reuseBranchOfTaskId: lineageTaskA.payload.task.taskId
+    });
+    assert.equal(lineageTaskB.payload.task.actualProviderFamily, 'deepseek');
+    assert(
+      lineageTaskB.payload.task.risk.includes('CRITICAL_GIT_OR_ENV_TAMPERED'),
+      'Root baseline inheritance MUST preserve .env.local tamper across reuseBranchOfTaskId!'
+    );
+
+    // Disable `antigravity` so `reviewer.normal` must pick from `[dsh (deepseek), kimi (moonshot)]`:
+    // Because `lineageTaskB` wrote to `lineageTaskA`'s branch using `deepseek`, reviewing `lineageTaskA` MUST skip `dsh` and pick `kimi` (`moonshot`)!
+    setMockProbeClis({
+      ...DEFAULT_ALL_READY_CLIS,
+      antigravity: { ...DEFAULT_ALL_READY_CLIS.antigravity, authenticated: false }
+    });
+    mockOrca.enqueueBehavior({
+      kind: 'complete_clean',
+      reportMarkdown: '# Lineage Cross-Family Review\nVerified against both qwen and deepseek.\n'
+    });
+    const lineageReview = await executeTeamTool('team_delegate', {
+      workspaceRoot: repo1,
+      title: 'Review shared branch lineage',
+      task: 'Review sub.mjs + sub.test.mjs',
+      type: 'review',
+      hard: false,
+      targetTaskId: lineageTaskA.payload.task.taskId
+    });
+    assert.equal(lineageReview.isError, false, JSON.stringify(lineageReview.payload));
+    assert.equal(lineageReview.payload.task.cli, 'kimi');
+    assert.equal(lineageReview.payload.task.actualProviderFamily, 'moonshot');
+    assert.equal(lineageReview.payload.task.reviewIndependenceGrade, 'config-inferred-sandwich');
+    assert.deepEqual(lineageReview.payload.task.crossFamilyVerifiedAgainst.sort(), ['deepseek', 'qwen']);
+
+    setMockProbeClis(DEFAULT_ALL_READY_CLIS);
+    await executeTeamTool('team_merge', {
+      workspaceRoot: repo1,
+      taskId: lineageTaskA.payload.task.taskId,
+      action: 'discard'
+    });
+    assert.equal(readFileSync(join(repo1, '.env.local'), 'utf8'), 'API_URL=https://safe.example.com\n');
+
+    // Fault 12: TOCTOU Config-Sandwich Drift (`CONFIG_DRIFTED_DURING_RUN`, `锋` R1/R2)
+    mockOrca.enqueueBehavior({
+      kind: 'stay_running',
+      writeFiles: [{ path: 'src/sandwich.mjs', content: 'export const s = 1;\n' }]
+    });
+    const sandwichStart = await executeTeamTool('team_delegate', {
+      workspaceRoot: repo1,
+      title: 'TOCTOU config-sandwich test',
+      task: 'Create src/sandwich.mjs',
+      type: 'feature',
+      waitSeconds: 0
+    });
+    assert.equal(sandwichStart.payload.task.status, 'RUNNING');
+    assert.equal(sandwichStart.payload.task.cli, 'pi');
+    assert.equal(sandwichStart.payload.task.actualProviderFamily, 'qwen');
+
+    // Mutate `pi`'s live config mid-run (`qwen` -> `moonshot`) AND mark the mock worker completed!
+    setMockProbeClis({
+      ...DEFAULT_ALL_READY_CLIS,
+      pi: {
+        ...DEFAULT_ALL_READY_CLIS.pi,
+        liveRouting: { model: 'kimi-coding/k2p5', actualProviderFamily: 'moonshot', familyConfidence: 'config-inferred' }
+      }
+    });
+    const stMid = mockOrca.readState();
+    for (const d of Object.values(stMid.dispatches)) {
+      if (d.status === 'running') {
+        d.status = 'completed';
+      }
+    }
+    writeFileSync(mockOrca.mockStatePath, JSON.stringify(stMid, null, 2), 'utf8');
+
+    const sandwichSettled = await executeTeamTool('team_board', {
+      workspaceRoot: repo1,
+      taskId: sandwichStart.payload.task.taskId,
+      waitSeconds: 2
+    });
+    assert.equal(sandwichSettled.payload.task.status, 'REPORTED');
+    assert(sandwichSettled.payload.task.risk.includes('CONFIG_DRIFTED_DURING_RUN'));
+    assert.equal(sandwichSettled.payload.task.familyConfidence, 'unknown');
+    assert(sandwichSettled.payload.task.writerFamilies.includes('unknown'));
+
+    // Reviewing a `CONFIG_DRIFTED_DURING_RUN` task MUST fail-closed with `TEAM_CROSS_FAMILY_UNAVAILABLE`!
+    const sandwichReview = await executeTeamTool('team_delegate', {
+      workspaceRoot: repo1,
+      title: 'Review drifted config task',
+      task: 'Should fail closed',
+      type: 'review',
+      targetTaskId: sandwichStart.payload.task.taskId
+    });
+    assert.equal(sandwichReview.isError, true);
+    assert.equal(sandwichReview.payload.error.code, 'TEAM_CROSS_FAMILY_UNAVAILABLE');
+
+    setMockProbeClis(DEFAULT_ALL_READY_CLIS);
+    await executeTeamTool('team_merge', {
+      workspaceRoot: repo1,
+      taskId: sandwichStart.payload.task.taskId,
+      action: 'discard'
+    });
+
+    // Fault 13: Crashed worker leaving half-written uncommitted file (`PARTIAL_UNCOMMITTED_ON_ERROR` + `gatewaySnapshot`)
+    mockOrca.enqueueBehavior({
+      kind: 'fail_worker',
+      errorMessage: 'Worker OOM mid-edit',
+      writeFiles: [{ path: 'src/half-written.mjs', content: 'export const broken =' }]
+    });
+    const crashDirtyRes = await executeTeamTool('team_delegate', {
+      workspaceRoot: repo1,
+      title: 'Crash mid-edit test',
+      task: 'Write half-written.mjs',
+      type: 'feature'
+    });
+    assert.equal(crashDirtyRes.payload.task.status, 'REPORTED');
+    assert(crashDirtyRes.payload.task.risk.includes('WORKER_EXIT_WITH_ERROR'));
+    assert(crashDirtyRes.payload.task.risk.includes('PARTIAL_UNCOMMITTED_ON_ERROR'));
+    assert.equal(crashDirtyRes.payload.task.facts.gatewaySnapshot.autoCommitted, true);
+    assert(crashDirtyRes.payload.task.facts.gatewaySnapshot.autoCommittedFiles.includes('src/half-written.mjs'));
+    await executeTeamTool('team_merge', {
+      workspaceRoot: repo1,
+      taskId: crashDirtyRes.payload.task.taskId,
+      action: 'discard'
+    });
+
     // Fault 9B: Delete `.team/state.json` and verify automatic self-healing from `.team/events.jsonl` + offline `audit.mjs`!
     rmSync(join(repo1, '.team', 'state.json'), { force: true });
     const boardAfterDelete = await executeTeamTool('team_board', { workspaceRoot: repo1 });
     assert.equal(boardAfterDelete.isError, false);
-    assert(boardAfterDelete.payload.tasks.length >= 6);
+    assert(boardAfterDelete.payload.tasks.length >= 9);
     assert(existsSync(join(repo1, '.team', 'state.json')), 'state.json must be rebuilt automatically');
 
     const auditReport = await auditWorkspaceTeamLedger(repo1);
     assert.equal(auditReport.ok, true, JSON.stringify(auditReport));
     assert.equal(auditReport.orphanBranches.length, 0);
 
-    console.log('\n[SMOKE PASSED] All positive 9-tool workflows, real Cabinet protocol bridge, and 10 fault-injection checks succeeded.');
+    console.log('\n[SMOKE PASSED] All positive 9-tool workflows, real Cabinet protocol bridge, and 13 fault-injection checks succeeded.');
   } finally {
     rmSync(sandbox, { recursive: true, force: true });
   }

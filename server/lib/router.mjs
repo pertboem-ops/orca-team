@@ -10,13 +10,65 @@ export class TeamRoutingError extends Error {
 }
 
 /**
+ * Compute the union of `writerFamilies` across the ENTIRE branch lineage (`Architect 远` R1 Deep Fix):
+ * When multiple write tasks share the same branch (e.g. `coder` creates `team/feature-1` and `tester`
+ * appends tests via `reuseBranchOfTaskId`), an independent `reviewer` MUST exclude ALL model families
+ * that ever wrote to `team/feature-1`, not just one single `taskId`'s `writerFamilies`!
+ */
+export function collectBranchLineageWriterFamilies(state, targetTask) {
+  if (!targetTask) return [];
+  const families = new Set();
+
+  const addFromTask = (t) => {
+    if (!t || t.mode !== 'write') return;
+    const list =
+      Array.isArray(t.writerFamilies) && t.writerFamilies.length > 0
+        ? t.writerFamilies
+        : t.actualProviderFamily
+          ? [t.actualProviderFamily]
+          : [];
+    for (const fam of list) {
+      if (fam) families.add(fam);
+    }
+  };
+
+  addFromTask(targetTask);
+
+  const allTasks = Object.values(state?.tasks || {});
+  if (targetTask.branch) {
+    for (const t of allTasks) {
+      if (t.mode === 'write' && t.branch === targetTask.branch) {
+        addFromTask(t);
+      }
+    }
+  }
+
+  let cursorId = targetTask.reuseBranchOfTaskId;
+  const visited = new Set([targetTask.taskId]);
+  while (cursorId && !visited.has(cursorId)) {
+    visited.add(cursorId);
+    const ancestor = state?.tasks?.[cursorId];
+    if (!ancestor) break;
+    addFromTask(ancestor);
+    cursorId = ancestor.reuseBranchOfTaskId;
+  }
+
+  if (families.size === 0 && targetTask.actualProviderFamily) {
+    families.add(targetTask.actualProviderFamily);
+  }
+
+  return [...families];
+}
+
+/**
  * Resolve deterministic role, CLI, model, family, confidence, and cross-family avoidance
- * from `(type, hard, targetTask, probe, workspaceRoot)`.
+ * from `(type, hard, targetTask, state, probe, workspaceRoot)`.
  */
 export function resolveRoleRoute({
   type,
   hard = false,
   targetTask = null,
+  state = null,
   probe,
   workspaceRoot = null
 }) {
@@ -46,18 +98,15 @@ export function resolveRoleRoute({
   const forbiddenFamilies = new Set();
 
   if (enforceCrossFamily) {
-    const rawWriterFamilies = Array.isArray(targetTask.writerFamilies)
-      ? targetTask.writerFamilies.filter(Boolean)
-      : targetTask.actualProviderFamily
-        ? [targetTask.actualProviderFamily]
-        : [];
+    const rawWriterFamilies = collectBranchLineageWriterFamilies(state, targetTask);
 
     if (rawWriterFamilies.length === 0 || rawWriterFamilies.includes('unknown')) {
       throw new TeamRoutingError(
         'TEAM_CROSS_FAMILY_UNAVAILABLE',
-        `无法对目标任务 "${targetTask.taskId}" 执行异源审查：目标写任务的模型家族记录为空或包含 "unknown"（${JSON.stringify(rawWriterFamilies)}），网关按 fail-closed 契约拒绝同源盲审。`,
+        `无法对目标任务 "${targetTask.taskId}" 执行异源审查：目标分支谱系的写模型家族记录为空或包含未验证/运行中漂移家族 "unknown"（${JSON.stringify(rawWriterFamilies)}），网关按 fail-closed 契约拒绝同源盲审。`,
         {
           targetTaskId: targetTask.taskId,
+          branch: targetTask.branch || null,
           writerFamilies: rawWriterFamilies
         }
       );

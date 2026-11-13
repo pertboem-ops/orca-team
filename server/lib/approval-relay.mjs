@@ -1,5 +1,11 @@
 import { matchesHighRiskFile } from './facts-snapshot.mjs';
-import { captureSensitiveFingerprints, diffFingerprints, execGitSafe, inspectGitWorkspace } from './git-safe.mjs';
+import {
+  captureSensitiveFingerprints,
+  diffFingerprints,
+  execGitSafe,
+  inspectGitWorkspace,
+  quarantineAndNeutralizeExecutableTamper
+} from './git-safe.mjs';
 import { loadBaselineSnapshot } from './isolation.mjs';
 import { execOrca } from './orca-exec.mjs';
 
@@ -32,17 +38,31 @@ export async function verifyApprovalSafety({
     return { highRiskFiles: [], tamperedFingerprints: [] };
   }
 
-  // 1. Pre-Git raw SHA-256 fingerprint check
+  // 1. Pre-Git raw SHA-256 fingerprint check against root baseline
   const baseline = loadBaselineSnapshot(workspaceRoot, task.taskId);
+  const rootSnap =
+    baseline?.rootFingerprints ||
+    baseline?.preCheckoutFingerprints ||
+    baseline?.baselineFingerprints ||
+    null;
   const currentFp = captureSensitiveFingerprints(workspaceRoot, { includeBackup: false });
-  const fpDiff = baseline?.baselineFingerprints
-    ? diffFingerprints(baseline.baselineFingerprints, currentFp)
-    : { ok: true, changed: [] };
+  const fpDiff = rootSnap
+    ? diffFingerprints(rootSnap, currentFp)
+    : { ok: true, changed: [], hasExecutableTamper: false };
+
+  if (fpDiff.hasExecutableTamper && rootSnap) {
+    const quarantined = quarantineAndNeutralizeExecutableTamper(workspaceRoot, rootSnap);
+    throw new TeamApprovalError(
+      'TEAM_EXECUTABLE_TAMPER_UNMERGEABLE',
+      `反盲批最高危熔断：任务 "${task.taskId}" 在请求审批前篡改了可执行级 Git 配置/钩子/IDE 自动任务文件（${fpDiff.changed.map((c) => c.displayPath).join(', ')}）。网关已在纯 Node 层立即隔离并还原被污染配置，严禁放行！请立即调用 team_interrupt({ taskId: "${task.taskId}", discardBranch: true }) 终止销毁。`,
+      { tamperedFingerprints: fpDiff.changed, quarantined }
+    );
+  }
 
   if (!fpDiff.ok && !acknowledgeCriticalTamper) {
     throw new TeamApprovalError(
       'TEAM_CRITICAL_TAMPER_BLOCKED',
-      `反盲批硬拦截：任务 "${task.taskId}" 在请求审批前已篡改敏感配置/钩子文件（${fpDiff.changed.map((c) => c.displayPath).join(', ')}）。请先调用 team_inspect 彻查，严禁盲目放行！`,
+      `反盲批硬拦截：任务 "${task.taskId}" 在请求审批前已修改敏感环境/包管理配置文件（${fpDiff.changed.map((c) => c.displayPath).join(', ')}）。请先调用 team_inspect 彻查，严禁盲目放行！`,
       { tamperedFingerprints: fpDiff.changed }
     );
   }
