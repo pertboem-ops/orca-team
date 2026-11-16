@@ -446,16 +446,16 @@ export async function settleWorkspaceAndReleaseLease({
     let autoCommitted = false;
     let autoCommittedFiles = [];
 
-    // Stage and commit any uncommitted work onto `team/<taskId>` (never `.team` or `.cabinet`)
-    if (gitState.status.trackedModified.length > 0 || gitState.status.untracked.length > 0) {
-      if (gitState.currentBranch !== task.branch && (await branchExistsLocally(gitRoot, task.branch, signal))) {
-        await execGitSafe(['checkout', task.branch], { cwd: gitRoot, signal });
-      }
-      await execGitSafe(['add', '-A'], { cwd: gitRoot, signal });
-      await execGitSafe(
-        ['rm', '-r', '--cached', '--ignore-unmatch', '--', '.team', '.cabinet'],
-        { cwd: gitRoot, signal }
-      );
+      // Stage and commit any uncommitted work onto `team/<taskId>` (never `.team`, `.cabinet`, or `.cabinet-pro`)
+      if (gitState.status.trackedModified.length > 0 || gitState.status.untracked.length > 0) {
+        if (gitState.currentBranch !== task.branch && (await branchExistsLocally(gitRoot, task.branch, signal))) {
+          await execGitSafe(['checkout', task.branch], { cwd: gitRoot, signal });
+        }
+        await execGitSafe(['add', '-A'], { cwd: gitRoot, signal });
+        await execGitSafe(
+          ['rm', '-r', '--cached', '--ignore-unmatch', '--', '.team', '.cabinet', '.cabinet-pro'],
+          { cwd: gitRoot, signal }
+        );
       const stagedRes = await execGitSafe(['diff', '--cached', '--name-only'], { cwd: gitRoot, signal });
       if (stagedRes.stdout.length > 0) {
         autoCommittedFiles = stagedRes.stdout

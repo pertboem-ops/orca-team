@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
   relayApprovalDecision,
@@ -482,66 +482,124 @@ function inferActionTaskType(action) {
   return { type: 'feature', hard: false };
 }
 
-function resolveCabinetProtocolFile(workspaceRoot, cabinetSessionId) {
-  const cabDir = join(workspaceRoot, '.cabinet');
-  if (!existsSync(cabDir)) {
-    throw new TeamExecutionError(
-      'TEAM_CABINET_DIR_NOT_FOUND',
-      `当前工作区 "${workspaceRoot}" 下不存在 .cabinet 目录，请先运行 orca-cabinet 完成议事结案。`
-    );
-  }
-
-  let sessionKey = cabinetSessionId && cabinetSessionId !== 'latest' ? String(cabinetSessionId).trim() : null;
-
-  if (!sessionKey) {
-    const indexJsonl = join(cabDir, 'index.jsonl');
-    if (existsSync(indexJsonl)) {
-      const lines = readFileSync(indexJsonl, 'utf8')
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i -= 1) {
-        try {
-          const rec = JSON.parse(lines[i]);
-          if (rec?.session || rec?.runKey) {
-            sessionKey = rec.session || rec.runKey;
-            break;
-          }
-        } catch {}
-      }
+function readProtocolTimestampMs(protocolPath, fallbackIndexTs = null) {
+  try {
+    const parsed = JSON.parse(readFileSync(protocolPath, 'utf8'));
+    if (parsed?.archivedAt) {
+      const t = Date.parse(parsed.archivedAt);
+      if (Number.isFinite(t)) return t;
     }
-    if (!sessionKey && existsSync(join(cabDir, 'runs'))) {
-      const dirs = readdirSync(join(cabDir, 'runs')).sort();
-      for (let i = dirs.length - 1; i >= 0; i -= 1) {
-        if (existsSync(join(cabDir, 'runs', dirs[i], 'protocol.json'))) {
-          sessionKey = dirs[i];
+  } catch {}
+  if (fallbackIndexTs) {
+    const t = Date.parse(fallbackIndexTs);
+    if (Number.isFinite(t)) return t;
+  }
+  try {
+    return statSync(protocolPath).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function findLatestProtocolInDir(cabDir) {
+  if (!existsSync(cabDir)) return null;
+  let sessionKey = null;
+  let indexTs = null;
+
+  const indexJsonl = join(cabDir, 'index.jsonl');
+  if (existsSync(indexJsonl)) {
+    const lines = readFileSync(indexJsonl, 'utf8')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      try {
+        const rec = JSON.parse(lines[i]);
+        if (rec?.session || rec?.runKey) {
+          sessionKey = rec.session || rec.runKey;
+          indexTs = rec.ts || null;
           break;
         }
+      } catch {}
+    }
+  }
+
+  if (!sessionKey && existsSync(join(cabDir, 'runs'))) {
+    const dirs = readdirSync(join(cabDir, 'runs')).sort();
+    for (let i = dirs.length - 1; i >= 0; i -= 1) {
+      if (existsSync(join(cabDir, 'runs', dirs[i], 'protocol.json'))) {
+        sessionKey = dirs[i];
+        break;
       }
     }
   }
 
-  if (!sessionKey) {
-    throw new TeamExecutionError(
-      'TEAM_PROTOCOL_NOT_FOUND',
-      `未在 "${cabDir}" 中找到任何已归档的内阁议定书 (protocol.json)。`
-    );
-  }
-
+  if (!sessionKey) return null;
   const candidates = [
     join(cabDir, 'runs', sessionKey, 'protocol.json'),
     join(cabDir, sessionKey, 'protocol.json')
   ];
-
   for (const p of candidates) {
     if (existsSync(p)) {
-      return { sessionKey, protocolPath: p };
+      return {
+        sessionKey,
+        protocolPath: p,
+        timestampMs: readProtocolTimestampMs(p, indexTs)
+      };
     }
   }
+  return null;
+}
+
+function resolveCabinetProtocolFile(workspaceRoot, cabinetSessionId) {
+  const cabProDir = join(workspaceRoot, '.cabinet-pro');
+  const cabDir = join(workspaceRoot, '.cabinet');
+  if (!existsSync(cabProDir) && !existsSync(cabDir)) {
+    throw new TeamExecutionError(
+      'TEAM_CABINET_DIR_NOT_FOUND',
+      `当前工作区 "${workspaceRoot}" 下不存在 .cabinet-pro 或 .cabinet 目录，请先运行 orca-cabinet-pro 或 orca-cabinet 完成议事结案。`
+    );
+  }
+
+  const rawId = cabinetSessionId && cabinetSessionId !== 'latest' ? String(cabinetSessionId).trim() : null;
+  if (rawId) {
+    let searchDirs = [cabProDir, cabDir];
+    let sessionKey = rawId;
+    if (rawId.startsWith('pro:')) {
+      searchDirs = [cabProDir];
+      sessionKey = rawId.slice(4).trim();
+    } else if (rawId.startsWith('cabinet:')) {
+      searchDirs = [cabDir];
+      sessionKey = rawId.slice(8).trim();
+    }
+
+    for (const dir of searchDirs) {
+      if (!existsSync(dir)) continue;
+      for (const p of [join(dir, 'runs', sessionKey, 'protocol.json'), join(dir, sessionKey, 'protocol.json')]) {
+        if (existsSync(p)) {
+          return { sessionKey, protocolPath: p };
+        }
+      }
+    }
+
+    throw new TeamExecutionError(
+      'TEAM_PROTOCOL_NOT_FOUND',
+      `未找到内阁场次 "${sessionKey}" 的议定书文件（已检查 .cabinet-pro/runs/${sessionKey}/protocol.json 与 .cabinet/runs/${sessionKey}/protocol.json）。`
+    );
+  }
+
+  const latestPro = findLatestProtocolInDir(cabProDir);
+  const latestCab = findLatestProtocolInDir(cabDir);
+
+  if (latestPro && latestCab) {
+    return latestPro.timestampMs >= latestCab.timestampMs ? latestPro : latestCab;
+  }
+  if (latestPro) return latestPro;
+  if (latestCab) return latestCab;
 
   throw new TeamExecutionError(
     'TEAM_PROTOCOL_NOT_FOUND',
-    `未找到内阁场次 "${sessionKey}" 的议定书文件（已检查 .cabinet/runs/${sessionKey}/protocol.json）。`
+    `未在 "${workspaceRoot}" 的 .cabinet-pro 或 .cabinet 目录中找到任何已归档的内阁议定书 (protocol.json)。`
   );
 }
 
@@ -1092,7 +1150,7 @@ export async function executeTeamTool(toolName, args = {}, signal) {
       }
 
       case 'team_from_protocol': {
-        // Pure local fast path — reads `.cabinet/runs/<runKey>/protocol.json` directly!
+        // Pure local fast path — reads `.cabinet-pro/runs/<runKey>/protocol.json` or `.cabinet/runs/<runKey>/protocol.json`
         const { sessionKey, protocolPath } = resolveCabinetProtocolFile(
           workspaceRoot,
           args.cabinetSessionId
@@ -1122,17 +1180,42 @@ export async function executeTeamTool(toolName, args = {}, signal) {
           );
         }
 
+        const safeSessionKey = String(sessionKey).replace(/[^a-zA-Z0-9\u4e00-\u9fa5._-]+/g, '-');
         const paths = ensureTeamDirs(workspaceRoot);
-        const workflowInputPath = join(paths.workflowInputsDir, `protocol-${sessionKey}.md`);
+        const workflowInputPath = join(paths.workflowInputsDir, `protocol-${safeSessionKey}.md`);
 
         const mdLines = [
           `# 内阁议定书施工背景单 (\`${sessionKey}\`)`,
           '',
+          `- 来源引擎: \`${protocol.engine || 'orca-cabinet'}\``,
           `- 来源议定书: \`${protocolPath}\``,
           `- 场景 / 档位: \`${protocol.scene || 'coding'}\` / \`${protocol.tier || 'standard'}\``,
           `- 议题: ${protocol.topic || ''}`,
           `- 结案摘要: ${protocol.brief || ''}`,
-          '',
+          ''
+        ];
+
+        if (protocol.piaoni && typeof protocol.piaoni === 'object') {
+          mdLines.push('## 首辅票拟方略与证伪红线 (`piaoni`)');
+          if (protocol.piaoni.primaryRecommendation) {
+            mdLines.push(`- **主推正本**: ${protocol.piaoni.primaryRecommendation}`);
+          }
+          if (protocol.piaoni.alternativeOption) {
+            mdLines.push(`- **备选副本**: ${protocol.piaoni.alternativeOption}`);
+          }
+          if (Array.isArray(protocol.piaoni.rejectedReasons) && protocol.piaoni.rejectedReasons.length > 0) {
+            mdLines.push(`- **弃用理由**: ${protocol.piaoni.rejectedReasons.join('；')}`);
+          }
+          if (
+            Array.isArray(protocol.piaoni.falsificationConditions) &&
+            protocol.piaoni.falsificationConditions.length > 0
+          ) {
+            mdLines.push(`- **证伪红线**: ${protocol.piaoni.falsificationConditions.join('；')}`);
+          }
+          mdLines.push('');
+        }
+
+        mdLines.push(
           '## 绑定工程裁决 (`decisions[]`)',
           ...(protocol.decisions || []).map((d, i) => `${i + 1}. ${d}`),
           '',
@@ -1143,7 +1226,7 @@ export async function executeTeamTool(toolName, args = {}, signal) {
           '',
           '## 行动清单 (`actions[]`)',
           ...protocol.actions.map((a, i) => `${i + 1}. **[${a.due}] (${a.owner})** ${a.item}`)
-        ];
+        );
         writeFileSync(workflowInputPath, `${mdLines.join('\n')}\n`, 'utf8');
 
         const draftTasks = protocol.actions.map((act, idx) => {
@@ -1165,6 +1248,7 @@ export async function executeTeamTool(toolName, args = {}, signal) {
           payload: {
             ok: true,
             workspaceRoot,
+            engine: protocol.engine || 'orca-cabinet',
             cabinetSessionId: sessionKey,
             protocolPath,
             workflowInputPath,

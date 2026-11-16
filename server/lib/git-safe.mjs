@@ -15,7 +15,7 @@ const MAX_FINGERPRINT_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_BACKUP_FILE_BYTES = 64 * 1024;
 const MAX_QUARANTINE_PREVIEW_CHARS = 2048;
 
-const IGNORED_TEAM_PREFIXES = ['.team/', '.team', '.cabinet/', '.cabinet'];
+const IGNORED_TEAM_PREFIXES = ['.team/', '.team', '.cabinet/', '.cabinet', '.cabinet-pro/', '.cabinet-pro'];
 
 export function toPosixRel(p) {
   return String(p || '')
@@ -176,6 +176,7 @@ function walkWorktreeSensitiveFiles(rootDir, currentDir, depth, maxDepth, entrie
       item.name === '.git' ||
       item.name === '.team' ||
       item.name === '.cabinet' ||
+      item.name === '.cabinet-pro' ||
       item.name === 'node_modules' ||
       item.name === '.venv' ||
       item.name === 'venv' ||

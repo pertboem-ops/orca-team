@@ -513,6 +513,47 @@ async function runSmokeSuite() {
     assert(protoRes.payload.draftTasks.length >= 1);
     assert(existsSync(protoRes.payload.workflowInputPath));
 
+    // 2b. Test untracked `.cabinet-pro/` precedence in `team_from_protocol` + `piaoni` rendering
+    console.log('2b. Testing untracked .cabinet-pro protocol handoff & piaoni rendering...');
+    const proRunDir = join(repo1, '.cabinet-pro', 'runs', '20261116-pro-smoke');
+    mkdirSync(proRunDir, { recursive: true });
+    writeFileSync(
+      join(repo1, '.cabinet-pro', 'index.jsonl'),
+      `${JSON.stringify({ session: '20261116-pro-smoke', ts: '2099-01-01T00:00:00.000Z' })}\n`,
+      'utf8'
+    );
+    writeFileSync(
+      join(proRunDir, 'protocol.json'),
+      JSON.stringify({
+        schemaVersion: 2,
+        engine: 'orca-cabinet-pro',
+        engineSchemaVersion: 1,
+        session: '20261116-pro-smoke',
+        brief: 'Grand Secretary pro smoke brief',
+        piaoni: {
+          primaryRecommendation: 'Adopt zero-copy state isolation with tenant shard keys.',
+          alternativeOption: 'Fallback to single-writer serialized queue.',
+          rejectedReasons: ['Full distributed lock adds excessive latency.'],
+          falsificationConditions: ['P99 write wait > 80ms under benchmark.']
+        },
+        decisions: ['Pro Decision D1'],
+        dissent: ['Minority note on peak traffic'],
+        actions: [{ due: 'Phase1', owner: 'coder-fast', item: 'Create src/calc.mjs helper' }],
+        archivedAt: '2099-01-01T00:00:00.000Z'
+      }),
+      'utf8'
+    );
+    const proProtoRes = await executeTeamTool('team_from_protocol', {
+      workspaceRoot: repo1,
+      cabinetSessionId: 'latest'
+    });
+    assert.equal(proProtoRes.isError, false, JSON.stringify(proProtoRes.payload));
+    assert.equal(proProtoRes.payload.engine, 'orca-cabinet-pro');
+    assert.equal(proProtoRes.payload.cabinetSessionId, '20261116-pro-smoke');
+    const proMdContent = readFileSync(proProtoRes.payload.workflowInputPath, 'utf8');
+    assert(proMdContent.includes('首辅票拟方略与证伪红线'), 'Generated workflow input must include piaoni section');
+    assert(proMdContent.includes('Adopt zero-copy state isolation'));
+
     // 3. Positive 9-tool closed loop (`board` -> `delegate` -> `steer` across 2nd family -> `review` cross-family -> `inspect` -> `merge` -> `delegate_batch` + `dsh` nudge)
     console.log('3. Testing positive 9-tool closed loop (delegate -> cold-start steer -> cross-family review -> inspect -> merge -> batch)...');
     const board0 = await executeTeamTool('team_board', { workspaceRoot: repo1 });
@@ -544,6 +585,14 @@ async function runSmokeSuite() {
     const branchCheck1 = await execGitSafe(['symbolic-ref', '--short', 'HEAD'], { cwd: repo1 });
     assert.equal(branchCheck1.stdout, 'main');
     assert(!existsSync(join(repo1, 'src', 'calc.mjs')), 'src/calc.mjs must stay isolated on team/<taskId> before merge!');
+    const committedTree = await execGitSafe(
+      ['ls-tree', '-r', '--name-only', del1.payload.task.branch],
+      { cwd: repo1 }
+    );
+    assert(
+      !committedTree.stdout.split(/\r?\n/).some((p) => p.startsWith('.cabinet-pro')),
+      'Untracked .cabinet-pro/ MUST never be auto-committed onto team/<taskId>!'
+    );
 
     // Fault 9A: Replay `idempotencyKey` -> zero duplicate worker spawn!
     const dupRes = await executeTeamTool('team_delegate', {

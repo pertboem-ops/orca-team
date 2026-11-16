@@ -313,17 +313,17 @@ export const TOOLS = [
   {
     name: 'team_from_protocol',
     description:
-      'Bridge from `orca-cabinet`: read `.cabinet/runs/<runKey>/protocol.json` (pass `"latest"` or omit `cabinetSessionId` to auto-resolve the newest finalized session from `.cabinet/index.jsonl`), validate `schemaVersion === 2`, write `.team/workflow-inputs/protocol-<runKey>.md`, and return structured task drafts.',
+      'Bridge from `orca-cabinet-pro` or `orca-cabinet`: read `.cabinet-pro/runs/<runKey>/protocol.json` or `.cabinet/runs/<runKey>/protocol.json` (pass `"latest"` or omit `cabinetSessionId` to auto-resolve the newest finalized session across both ledgers), validate `schemaVersion === 2`, write `.team/workflow-inputs/protocol-<runKey>.md` (including `piaoni` when present), and return structured task drafts.',
     inputSchema: {
       type: 'object',
       properties: {
         workspaceRoot: {
           type: 'string',
-          description: 'Absolute path of the target Git workspace directory containing `.cabinet/`.'
+          description: 'Absolute path of the target Git workspace directory containing `.cabinet-pro/` or `.cabinet/`.'
         },
         cabinetSessionId: {
           type: 'string',
-          description: 'Optional Cabinet session `runKey` or `"latest"` (default: `"latest"`).'
+          description: 'Optional Cabinet session `runKey` (supports optional `pro:` / `cabinet:` prefix) or `"latest"` (default: `"latest"`).'
         }
       },
       additionalProperties: false
